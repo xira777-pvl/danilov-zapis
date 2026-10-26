@@ -145,7 +145,7 @@ a{color:var(--green)}
 
 BODY = """
 <div class="wrap">
-  <h1>Запись в баню</h1>
+  <h1>Форма бронирования</h1>
   <p class="lead">«В гостях у Даниловых»</p>
 
   <div class="card">
@@ -245,7 +245,7 @@ def render(busy: dict, today: date, updated: datetime) -> str:
               .replace("__DAYS__", json.dumps(availability(busy, today))))
     return ("<!doctype html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            "<title>Запись в баню — В гостях у Даниловых</title>\n"
+            "<title>Форма бронирования — В гостях у Даниловых</title>\n"
             "<meta name=\"robots\" content=\"noindex\">\n"
             f"<style>{CSS}</style>\n</head>\n<body>{body}<script>{script}</script>\n</body>\n</html>\n")
 
