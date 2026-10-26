@@ -17,8 +17,8 @@ from brief.dates import OMSK, omsk_today
 
 DAYS_AHEAD = 62
 OPEN, CLOSE = "10:00", "22:00"  # bath hours from the booking resource (Mondays open at 16:00)
-FORM_ID, FORM_SEC = 5, "c410qz"  # CRM form «Онлайн запись на программы»
-FORM_LOADER = "https://cdn-ru.bitrix24.ru/b38758868/crm/form/loader_5.js"
+FORM_ID, FORM_SEC = 29, "49w4ka"  # CRM form «Заявка на запись (страница с календарём)»
+FORM_LOADER = "https://cdn-ru.bitrix24.ru/b38758868/crm/form/loader_29.js"
 OFERTA = "https://danilovhouse.ru/p/oferta/"
 
 
