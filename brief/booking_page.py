@@ -57,6 +57,57 @@ def busy_days(vs: list[dict]) -> dict[str, list[list[str]]]:
     return dict(sorted(out.items()))
 
 
+CLEANUP = 60  # minutes after every visit before the next guests can arrive
+
+
+def _minutes(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _hhmm(m: int) -> str:
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def day_rules(day: date) -> tuple[int, int, int, int]:
+    """(open, close, shortest window, latest start) in minutes for a weekday.
+
+    A window must hold a program plus cleanup: 5 h on ordinary days (4 h program + 1 h),
+    3 h on Tuesdays, which run the short «Банный вторник» programs.
+    """
+    tuesday = day.weekday() == 1
+    opens = 16 * 60 if day.weekday() == 0 else 10 * 60
+    return opens, 22 * 60, (3 if tuesday else 5) * 60, (19 if tuesday else 16) * 60
+
+
+def start_ranges(day: date, spans: list[list[str]]) -> list[list[str]]:
+    """[["HH:MM", "HH:MM"], ...]: when a new program may start on this day."""
+    opens, closes, shortest, latest = day_rules(day)
+    gaps, cur = [], opens
+    for f, t in sorted((_minutes(f), _minutes(t) + CLEANUP) for f, t in spans):
+        if f > cur:
+            gaps.append((cur, min(f, closes)))
+        cur = max(cur, t)
+    if cur < closes:
+        gaps.append((cur, closes))
+    out = []
+    for a, b in gaps:
+        last = min(latest, b - shortest)
+        if last >= a:
+            out.append([_hhmm(a), _hhmm(last)])
+    return out
+
+
+def availability(busy: dict[str, list[list[str]]], today: date) -> dict[str, dict]:
+    """Per day of the public horizon: {"visits": bool, "starts": start ranges}."""
+    out = {}
+    for i in range(DAYS_AHEAD):
+        day = today + timedelta(days=i)
+        spans = busy.get(day.isoformat(), [])
+        out[day.isoformat()] = {"visits": bool(spans), "starts": start_ranges(day, spans)}
+    return out
+
+
 CSS = """
 :root{--bg:#f4f1ea;--card:#fff;--ink:#1f2a24;--muted:#6b746e;--line:#e2ddd2;--green:#133a2e;
 --free:#e3f1e6;--free-ink:#1d6b3a;--part:#fbefd5;--part-ink:#8a5a00;--busy:#f3dcdc;--busy-ink:#9b2c2c;--past:#f0eee9}
@@ -110,7 +161,7 @@ BODY = """
       <span><i style="background:var(--part)"></i>есть свободное время</span>
       <span><i style="background:var(--busy)"></i>занято</span>
     </div>
-    <div class="info" id="info" aria-live="polite">Нажмите на день, чтобы увидеть свободное время.</div>
+    <div class="info" id="info" aria-live="polite">Нажмите на день, чтобы узнать, когда можно начать программу.</div>
     <p class="note">Календарь для ориентира, обновлён __UPDATED__ (Омск). Записаться в нём нельзя:
       оставьте заявку ниже, менеджер свяжется и подтвердит дату.</p>
   </div>
@@ -134,33 +185,20 @@ BODY = """
 """
 
 SCRIPT = """
-const TODAY = __TODAY__, BUSY = __BUSY__, DAYS_AHEAD = __DAYS_AHEAD__;
-const MIN_WINDOW = 120;  // minutes; a shorter gap is not shown as free time
+const TODAY = __TODAY__, DAYS = __DAYS__;
 const MONTHS = ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
 const MONTHS_OF = ["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"];
-const DAYS = ["воскресенье","понедельник","вторник","среда","четверг","пятница","суббота"];
+const WEEKDAYS = ["воскресенье","понедельник","вторник","среда","четверг","пятница","суббота"];
 const pad = n => String(n).padStart(2, "0");
 const iso = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-const mins = s => { const [h, m] = s.split(":").map(Number); return h*60 + m; };
-const hhmm = m => `${pad(Math.floor(m/60))}:${pad(m%60)}`;
-const hours = d => d.getDay() === 1 ? [960, 1320] : [600, 1320];
-
-function windows(d) {
-  const [lo, hi] = hours(d), out = [];
-  let cur = lo;
-  for (const [f, t] of (BUSY[iso(d)] || []).map(([f, t]) => [mins(f), mins(t)])) {
-    if (Math.min(f, hi) - cur >= MIN_WINDOW) out.push([cur, Math.min(f, hi)]);
-    cur = Math.max(cur, t);
-  }
-  if (hi - cur >= MIN_WINDOW) out.push([cur, hi]);
-  return out;
-}
 const start = new Date(TODAY + "T00:00");
-const end = new Date(start); end.setDate(end.getDate() + DAYS_AHEAD);
+const end = new Date(start); end.setDate(end.getDate() + Object.keys(DAYS).length);
+// Start ranges are computed server-side (brief.booking_page.start_ranges); the page only shows them.
 function state(d) {
-  if (d < start || d >= end) return "past";
-  if (!BUSY[iso(d)]) return "free";
-  return windows(d).length ? "part" : "busy";
+  const x = DAYS[iso(d)];
+  if (!x) return "past";
+  if (!x.visits) return "free";
+  return x.starts.length ? "part" : "busy";
 }
 const first = new Date(start.getFullYear(), start.getMonth(), 1);
 const lastMonth = new Date(end.getFullYear(), end.getMonth(), 1);
@@ -185,9 +223,10 @@ function render() {
 }
 function pick(d) {
   selected = iso(d);
-  const s = state(d), title = `${d.getDate()} ${MONTHS_OF[d.getMonth()]}, ${DAYS[d.getDay()]}`;
+  const s = state(d), title = `${d.getDate()} ${MONTHS_OF[d.getMonth()]}, ${WEEKDAYS[d.getDay()]}`;
+  const when = DAYS[iso(d)].starts.map(([f, t]) => f === t ? `в ${f}` : `с ${f} до ${t}`).join(" или ");
   let text = s === "busy" ? `<b>${title}</b>: день занят, выберите другую дату.`
-    : `<b>${title}</b>: свободно ${windows(d).map(([f, t]) => `${hhmm(f)}–${hhmm(t)}`).join(", ")}. Укажите эту дату в заявке ниже.`;
+    : `<b>${title}</b>: можно начать программу ${when}. Укажите эту дату в заявке ниже.`;
   if (d.getDay() === 2) text += " По вторникам проходят программы «Банного вторника».";
   document.getElementById("info").innerHTML = text;
   render();
@@ -203,7 +242,7 @@ def render(busy: dict, today: date, updated: datetime) -> str:
             .replace("__FORM_ID__", str(FORM_ID)).replace("__FORM_SEC__", FORM_SEC)
             .replace("__FORM_LOADER__", FORM_LOADER))
     script = (SCRIPT.replace("__TODAY__", json.dumps(today.isoformat()))
-              .replace("__BUSY__", json.dumps(busy)).replace("__DAYS_AHEAD__", str(DAYS_AHEAD)))
+              .replace("__DAYS__", json.dumps(availability(busy, today))))
     return ("<!doctype html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             "<title>Запись в баню — В гостях у Даниловых</title>\n"
