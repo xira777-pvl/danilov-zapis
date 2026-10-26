@@ -27,6 +27,10 @@ RETRY_PAUSES = (15, 45)
 
 
 def make_call(base_url: str) -> Call:
+    base_url = base_url.strip()
+    if not base_url.endswith("/"):
+        base_url += "/"  # a webhook pasted without the trailing slash would glue onto the method
+
     def call(method: str, params: dict) -> dict:
         url = f"{base_url}{method}.json?{urlencode(params, doseq=True)}"
         for pause in (*RETRY_PAUSES, None):
