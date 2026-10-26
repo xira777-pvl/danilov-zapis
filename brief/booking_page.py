@@ -145,8 +145,8 @@ a{color:var(--green)}
 
 BODY = """
 <div class="wrap">
-  <h1>Запись в баню</h1>
-  <p class="lead">«В гостях у Даниловых» · частная баня с чаном и купелью</p>
+  <h1>Форма бронирования</h1>
+  <p class="lead">«В гостях у Даниловых»</p>
 
   <div class="card">
     <h2>Свободные даты</h2>
@@ -171,7 +171,7 @@ BODY = """
     <div class="terms">
       Заявка не бронирует дату: менеджер свяжется, подтвердит её и пришлёт ссылку на оплату.
       <ul>
-        <li>Дата держится за вами 48 часов после получения ссылки на оплату.</li>
+        <li>Дата держится за вами 24 часа после получения ссылки на оплату.</li>
         <li>Бронь подтверждается оплатой, это принятие <a href="__OFERTA__" target="_blank" rel="noopener">договора-оферты</a>.</li>
         <li>Отмена не позднее чем за 72 часа до визита — деньги возвращаются полностью.</li>
       </ul>
@@ -245,7 +245,7 @@ def render(busy: dict, today: date, updated: datetime) -> str:
               .replace("__DAYS__", json.dumps(availability(busy, today))))
     return ("<!doctype html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            "<title>Запись в баню — В гостях у Даниловых</title>\n"
+            "<title>Форма бронирования — В гостях у Даниловых</title>\n"
             "<meta name=\"robots\" content=\"noindex\">\n"
             f"<style>{CSS}</style>\n</head>\n<body>{body}<script>{script}</script>\n</body>\n</html>\n")
 
