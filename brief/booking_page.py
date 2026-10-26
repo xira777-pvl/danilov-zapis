@@ -146,7 +146,7 @@ a{color:var(--green)}
 BODY = """
 <div class="wrap">
   <h1>Запись в баню</h1>
-  <p class="lead">«В гостях у Даниловых» · частная баня с чаном и купелью</p>
+  <p class="lead">«В гостях у Даниловых»</p>
 
   <div class="card">
     <h2>Свободные даты</h2>
