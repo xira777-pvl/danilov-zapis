@@ -1,0 +1,42 @@
+# Rebuilds the public booking page from Bitrix CRM deals every hour and publishes it
+# to GitHub Pages. Needs the repository secret BITRIX_WEBHOOK_URL (a CRM-only webhook).
+name: pages
+
+on:
+  schedule:
+    - cron: "5 * * * *"  # every hour at :05 UTC; GitHub may start a few minutes late
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Build page
+        env:
+          BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
+        run: |
+          mkdir -p site
+          uv run --no-project --python 3.12 --with certifi python -m brief.booking_page site/index.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
