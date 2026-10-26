@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from datetime import date, datetime, timedelta
+from urllib.error import HTTPError
 
 from brief.bitrix import make_call, visits
 from brief.dates import OMSK, omsk_today
@@ -215,7 +216,13 @@ def main() -> int:
     call = make_call(os.environ["BITRIX_WEBHOOK_URL"])
     today = omsk_today()
     # From yesterday: a visit that started then may still occupy this morning.
-    busy = busy_days(visits(call, today - timedelta(days=1), today + timedelta(days=DAYS_AHEAD)))
+    try:
+        vs = visits(call, today - timedelta(days=1), today + timedelta(days=DAYS_AHEAD))
+    except HTTPError as exc:
+        # Bitrix's JSON error (e.g. insufficient_scope) never contains the webhook URL.
+        print(f"Bitrix HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:300]}", file=sys.stderr)
+        return 1
+    busy = busy_days(vs)
     busy = {d: spans for d, spans in busy.items() if d >= today.isoformat()}
     with open(out, "w", encoding="utf-8") as f:
         f.write(render(busy, today, datetime.now(OMSK)))
