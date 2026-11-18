@@ -1,7 +1,7 @@
 """Public booking page: a read-only availability calendar over the Bitrix CRM form.
 
 Busy time comes from CRM deals («Время записи» + «Длительность, часов»). The public
-page contains fixed slot availability and available start ranges by visit duration.
+page contains fixed slot availability and available hourly starts by visit duration.
 The guest chooses a program and time, then requests confirmation through the form.
 
 Usage: python -m brief.booking_page <out.html>   (needs BITRIX_WEBHOOK_URL)
@@ -18,6 +18,7 @@ from brief.dates import OMSK, omsk_today
 DAYS_AHEAD = 62
 OPEN, CLOSE = "10:00", "22:00"
 FLEX_PRICE = 60_000
+FLEX_LAST_START = "16:00"
 FORM_ID, FORM_SEC = 29, "49w4ka"  # CRM form «Заявка на запись (страница с календарём)»
 FORM_LOADER = "https://cdn-ru.bitrix24.ru/b38758868/crm/form/loader_29.js"
 OFERTA = "https://danilovhouse.ru/p/oferta/"
@@ -29,10 +30,10 @@ PROGRAMS = (
     ("na-dvoih-5-chasov", "153", "На двоих — 5 часов", 300, 40_000),
     ("legkiy-par", "141", "Лёгкий пар (4–5 часов, до 12 гостей)", 300, 60_000),
     ("stihiya", "143", "Стихия (4–5 часов, до 8 гостей)", 300, 60_000),
-    ("deviche-teplo", "119", "Девичье тепло (5–6 часов, 2–12 гостей)", 360, 60_000),
+    ("deviche-teplo", "119", "Девичье тепло (5–6 часов, до 12 гостей)", 360, 60_000),
     ("zhenskaya-stihiya", "121", "Женская стихия (5–6 часов, до 8 гостей)", 360, 60_000),
-    ("sila-ognya", "123", "Сила огня (5–6 часов, 2–12 гостей)", 360, 60_000),
-    ("muzhskaya-zakalka", "125", "Мужская закалка (5–6 часов, 2–8 гостей)", 360, 60_000),
+    ("sila-ognya", "123", "Сила огня (5–6 часов, до 12 гостей)", 360, 60_000),
+    ("muzhskaya-zakalka", "125", "Мужская закалка (5–6 часов, до 8 гостей)", 360, 60_000),
 )
 
 
@@ -87,15 +88,15 @@ def _minutes(hhmm: str) -> int:
     return int(h) * 60 + int(m)
 
 
-def day_slots(spans: list[list[str]]) -> list[dict]:
-    """Fixed slots, allowing cleanup after both existing and requested visits.
+def _can_fit(start: int, end: int, busy: list[tuple[int, int]]) -> bool:
+    """Half-open intervals permit a visit to start exactly when cleanup ends."""
+    return not any(start < booked_end + CLEANUP and booked_start < end + CLEANUP
+                   for booked_start, booked_end in busy)
 
-    Half-open intervals permit the next visit to start exactly when cleanup ends.
-    """
-    busy = [(_minutes(f), _minutes(t) + CLEANUP) for f, t in spans]
+
+def day_slots(busy: list[tuple[int, int]]) -> list[dict]:
     return [{"id": slot_id, "label": label, "start": start, "end": end,
-             "available": not any(_minutes(start) < t and f < _minutes(end) + CLEANUP
-                                  for f, t in busy)}
+             "available": _can_fit(_minutes(start), _minutes(end), busy)}
             for slot_id, label, start, end in SLOTS]
 
 
@@ -104,21 +105,11 @@ def _clock(minutes: int) -> str:
     return f"{hour:02}:{minute:02}"
 
 
-def start_ranges(spans: list[list[str]], duration: int) -> list[list[str]]:
-    """Inclusive ranges of whole-minute starts with a full visit and cleanup between guests."""
-    ranges = []
-    earliest = _minutes(OPEN)
-    last = _minutes(CLOSE) - duration
-    for start, end in spans:  # busy_days provides sorted, merged intervals
-        before_visit = min(last, _minutes(start) - CLEANUP - duration)
-        if earliest <= before_visit:
-            ranges.append([_clock(earliest), _clock(before_visit)])
-        earliest = max(earliest, _minutes(end) + CLEANUP)
-        if earliest > last:
-            return ranges
-    if earliest <= last:
-        ranges.append([_clock(earliest), _clock(last)])
-    return ranges
+def hourly_starts(busy: list[tuple[int, int]], duration: int) -> list[str]:
+    """Whole-hour starts that fit the visit by closing and leave time for cleanup."""
+    last = min(_minutes(FLEX_LAST_START), _minutes(CLOSE) - duration)
+    return [_clock(start) for start in range(_minutes(OPEN), last + 1, 60)
+            if _can_fit(start, start + duration, busy)]
 
 
 def availability(busy: dict[str, list[list[str]]], today: date) -> dict[str, dict]:
@@ -127,10 +118,10 @@ def availability(busy: dict[str, list[list[str]]], today: date) -> dict[str, dic
     out = {}
     for i in range(DAYS_AHEAD):
         day = (today + timedelta(days=i)).isoformat()
-        spans = busy.get(day, [])
+        spans = [(_minutes(start), _minutes(end)) for start, end in busy.get(day, [])]
         out[day] = {
             "slots": day_slots(spans),
-            "starts": {str(duration): start_ranges(spans, duration) for duration in durations},
+            "starts": {str(duration): hourly_starts(spans, duration) for duration in durations},
         }
     return out
 
@@ -146,13 +137,10 @@ h1{font-size:24px;margin:0 0 4px;color:var(--green)}
 .card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 h2{font-size:17px;margin:0 0 12px}
 .program{margin:0 0 16px}.program label,.flex-choice label{display:block;font-weight:600;margin-bottom:5px}
-.program select,.flex-choice select,.flex-choice input{width:100%;border:1px solid var(--line);border-radius:8px;background:#fff;
+.program select,.flex-choice select{width:100%;border:1px solid var(--line);border-radius:8px;background:#fff;
 font:inherit;color:var(--ink);padding:9px 8px}
-.program select:focus-visible,.flex-choice :is(select,input):focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.program select:focus-visible,.flex-choice select:focus-visible{outline:2px solid var(--green);outline-offset:2px}
 .flex-choice{margin-top:10px}
-.flex-choice .range-picker{margin-bottom:10px}
-.flex-choice .note{margin:4px 0 8px}
-#time-error{color:var(--busy-ink)}#time-error:empty{display:none}
 #form-status:empty{display:none}
 #booking-crm{border:0;margin:0;padding:0;min-inline-size:0}
 #booking-crm [data-booking-synced]{display:none!important}
@@ -202,7 +190,7 @@ BODY = """
       </select>
       <p class="note" id="program-help">Программы дешевле 60 000 ₽ начинаются в 10:00 или 15:00.
         Утреннее время подходит для программ до четырёх часов.
-        Для программ от 60 000 ₽ выберите удобное время начала, чтобы закончить к 22:00.
+        Для программ от 60 000 ₽ доступны свободные часы начала с 10:00 до 16:00. Визит завершится к 22:00.
         Между визитами мы оставляем час на уборку.</p>
     </div>
     <h2>Свободные даты</h2>
@@ -220,14 +208,10 @@ BODY = """
     <div class="info" id="info" aria-live="polite">Выберите дату и время.</div>
     <div class="slots" id="slots" aria-label="Слоты на выбранную дату"></div>
     <div class="flex-choice" id="flex-choice" hidden>
-      <div class="range-picker" id="range-picker" hidden>
-        <label for="start-range">Доступный диапазон начала</label>
-        <select id="start-range"></select>
-      </div>
       <label for="start-time">Время начала</label>
-      <p class="note" id="time-range"></p>
-      <input id="start-time" type="time" step="60" aria-describedby="time-range time-error">
-      <p class="note" id="time-error" aria-live="polite"></p>
+      <select id="start-time">
+        <option value="">Выберите время</option>
+      </select>
     </div>
     <p class="note">Время указано по Омску.</p>
     <p class="note">Календарь для ориентира, обновлён __UPDATED__ (Омск). Записаться в нём нельзя:
@@ -255,7 +239,7 @@ BODY = """
 
 SCRIPT = r"""
 const TODAY = __TODAY__, DAYS = __DAYS__;
-const FLEX_PRICE = __FLEX_PRICE__, OPEN = "__OPEN__", CLOSE = "__CLOSE__";
+const FLEX_PRICE = __FLEX_PRICE__, OPEN = "__OPEN__", CLOSE = "__CLOSE__", FLEX_LAST_START = "__FLEX_LAST_START__";
 const PROGRAMS = new Map(__PROGRAMS__.map(([slug, id, label, duration, price]) => [slug, {id, label, duration, price}]));
 const CRM_FIELDS = {
   date: "DEAL_UF_CRM_WISH_DATE",
@@ -265,9 +249,7 @@ const CRM_FIELDS = {
 const programSelect = document.getElementById("program");
 const crm = document.getElementById("booking-crm");
 const formStatus = document.getElementById("form-status");
-const timeInput = document.getElementById("start-time");
-const rangeSelect = document.getElementById("start-range");
-const timeError = document.getElementById("time-error");
+const timeSelect = document.getElementById("start-time");
 for (const [slug, program] of PROGRAMS) {
   programSelect.add(new Option(program.label, slug));
 }
@@ -293,23 +275,21 @@ function slotStatus(day, slot, program, now) {
   if (minutes(slot.start) < nextMinute(day, now)) return "Время прошло";
   return "";
 }
-function flexRanges(day, duration, now) {
+function flexStarts(day, duration, now) {
   const earliest = nextMinute(day, now);
-  return (DAYS[day]?.starts[duration] || [])
-    .map(([from, to]) => [Math.max(minutes(from), earliest), minutes(to)])
-    .filter(([from, to]) => from <= to);
+  return (DAYS[day]?.starts[duration] || []).filter(time => minutes(time) >= earliest);
 }
-const contains = ([from, to], minute) => minute !== null && minute >= from && minute <= to;
 const someFlexTime = (day, now) => Object.keys(DAYS[day].starts)
-  .some(duration => flexRanges(day, duration, now).length > 0);
+  .some(duration => flexStarts(day, duration, now).length > 0);
 function state(d, now) {
   const day = iso(d), data = DAYS[day], program = currentProgram();
   if (!data || localMidnight(day) + 86400000 <= now) return "past";
   if (isFlexible(program)) {
-    const ranges = flexRanges(day, program.duration, now);
-    if (!ranges.length) return "busy";
-    const [from, to] = ranges[0];
-    return from === minutes(OPEN) && to === minutes(CLOSE) - program.duration ? "free" : "part";
+    const starts = flexStarts(day, program.duration, now);
+    if (!starts.length) return "busy";
+    const latest = Math.min(minutes(FLEX_LAST_START), minutes(CLOSE) - program.duration);
+    const fullDayCount = Math.floor((latest - minutes(OPEN)) / 60) + 1;
+    return starts.length === fullDayCount ? "free" : "part";
   }
   const compatible = data.slots.filter(slot => fits(program, slot));
   const count = compatible.filter(slot => !slotStatus(day, slot, program, now)).length;
@@ -324,7 +304,7 @@ function activeChoice(now) {
   if (!selected || selectedStart === null) return null;
   const program = currentProgram();
   if (isFlexible(program)) {
-    if (!flexRanges(selected, program.duration, now).some(range => contains(range, selectedStart))) return null;
+    if (!flexStarts(selected, program.duration, now).includes(clock(selectedStart))) return null;
     return {start: clock(selectedStart), end: clock(selectedStart + program.duration)};
   }
   return DAYS[selected].slots.find(slot => minutes(slot.start) === selectedStart &&
@@ -421,46 +401,29 @@ function pick(d) {
   if (state(d, Date.now()) === "past") return refresh();
   selected = iso(d);
   selectedStart = null;
-  rangeSelect.value = "";
   refresh();
 }
 
-function renderFlexible(ranges, preserveDraft) {
+function renderFlexible(starts) {
   const editor = document.getElementById("flex-choice");
-  editor.hidden = ranges.length === 0;
-  timeInput.disabled = editor.hidden;
-  if (editor.hidden) {
-    timeInput.value = "";
-    return;
-  }
-  const oldRange = rangeSelect.value;
-  const nextOptions = ranges.map(([from, to]) => `<option value="${from}">${clock(from)}–${clock(to)}</option>`).join("");
-  if (rangeSelect.innerHTML !== nextOptions) rangeSelect.innerHTML = nextOptions;
-  document.getElementById("range-picker").hidden = ranges.length < 2;
-  const chosen = ranges.find(range => contains(range, selectedStart));
-  const [from, to] = chosen || ranges.find(range => String(range[0]) === oldRange) || ranges[0];
-  rangeSelect.value = String(from);
-  timeInput.min = clock(from);
-  timeInput.max = clock(to);
-  if (!preserveDraft) timeInput.value = chosen ? clock(selectedStart) : "";
-  const invalid = timeInput.value && !timeInput.validity.valid;
-  timeInput.setAttribute("aria-invalid", String(Boolean(invalid)));
-  timeError.textContent = invalid ? "Выберите время в доступном диапазоне." : "";
-  document.getElementById("time-range").textContent = from === to
-    ? `Доступное начало — ${clock(from)}.`
-    : `В пределах ${clock(from)}–${clock(to)}, с точностью до минуты.`;
+  editor.hidden = starts.length === 0;
+  timeSelect.disabled = editor.hidden;
+  const options = ['<option value="">Выберите время</option>',
+    ...starts.map(time => `<option value="${time}">${time}</option>`)].join("");
+  if (timeSelect.innerHTML !== options) timeSelect.innerHTML = options;
+  timeSelect.value = selectedStart === null ? "" : clock(selectedStart);
 }
 
-function refresh(preserveDraft = false) {
+function refresh() {
   const now = Date.now(), program = currentProgram(), flexible = isFlexible(program);
   if (selected && state(new Date(selected + "T00:00:00Z"), now) === "past") selected = null;
   const choice = activeChoice(now);
   if (!choice) selectedStart = null;
   const data = DAYS[selected];
-  const ranges = flexible && data ? flexRanges(selected, program.duration, now) : [];
+  const starts = flexible && data ? flexStarts(selected, program.duration, now) : [];
   render(now);
   syncForm(choice);
-  renderFlexible(ranges, preserveDraft);
+  renderFlexible(starts);
   const panel = document.getElementById("slots"), summary = document.getElementById("selection");
   const info = document.getElementById("info");
   const programLine = program ? `<strong>${program.label}</strong>` : "";
@@ -475,7 +438,7 @@ function refresh(preserveDraft = false) {
   const fixed = flexible ? [] : data.slots;
   const freeFixed = fixed.some(slot => !slotStatus(selected, slot, program, now));
   const needsProgram = !program && !freeFixed && someFlexTime(selected, now);
-  const nextChoice = ranges.length ? "Укажите время начала." : freeFixed ? "Выберите свободный слот."
+  const nextChoice = starts.length ? "Укажите время начала." : freeFixed ? "Выберите свободный слот."
     : needsProgram ? "Выберите программу от 60 000 ₽, чтобы увидеть свободное время начала."
     : "Подходящего свободного времени нет. Выберите другую дату.";
   info.innerHTML = `<b>${title}</b>. ${nextChoice}`;
@@ -501,18 +464,14 @@ function refresh(preserveDraft = false) {
   return choice;
 }
 programSelect.addEventListener("change", () => refresh());
-rangeSelect.addEventListener("change", () => {
-  selectedStart = null;
+timeSelect.addEventListener("change", () => {
+  selectedStart = timeSelect.value ? minutes(timeSelect.value) : null;
   refresh();
-});
-timeInput.addEventListener("input", () => {
-  selectedStart = timeInput.value && timeInput.validity.valid ? minutes(timeInput.value) : null;
-  refresh(true);
 });
 document.getElementById("prev").onclick = () => { view = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() - 1, 1)); refresh(); };
 document.getElementById("next").onclick = () => { view = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() + 1, 1)); refresh(); };
-document.addEventListener("visibilitychange", () => refresh(true));
-setInterval(() => refresh(true), 30000);
+document.addEventListener("visibilitychange", refresh);
+setInterval(refresh, 30000);
 refresh();
 
 const loader = document.createElement("script");
@@ -530,6 +489,7 @@ def render(busy: dict, today: date, updated: datetime) -> str:
               .replace("__DAYS__", json.dumps(availability(busy, today)))
               .replace("__PROGRAMS__", json.dumps(PROGRAMS, ensure_ascii=False))
               .replace("__FLEX_PRICE__", str(FLEX_PRICE)).replace("__OPEN__", OPEN).replace("__CLOSE__", CLOSE)
+              .replace("__FLEX_LAST_START__", FLEX_LAST_START)
               .replace("__FORM_ID__", str(FORM_ID)).replace("__FORM_LOADER__", FORM_LOADER))
     return ("<!doctype html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"

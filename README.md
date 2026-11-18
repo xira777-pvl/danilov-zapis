@@ -3,7 +3,7 @@
 Public booking page for «В гостях у Даниловых»: a read-only availability calendar built
 hourly from Bitrix CRM deals, with the Bitrix CRM request form embedded below it.
 
-The public calendar contains fixed slot availability and available start ranges by
+The public calendar contains fixed slot availability and available hourly starts by
 program duration. Deal details stay in Bitrix.
 
 The code in `brief/` is copied from the private `danilov-morning-brief` repository
