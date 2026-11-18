@@ -1,7 +1,7 @@
 """Public booking page: a read-only availability calendar over the Bitrix CRM form.
 
 Busy time comes from CRM deals («Время записи» + «Длительность, часов»); only start and
-end times leave Bitrix — no names, sums or deal ids. A guest sees free days and windows,
+end times leave Bitrix — no names, sums or deal ids. A guest sees two fixed daily slots,
 then leaves a request in the embedded Bitrix form; the manager confirms by phone.
 
 Usage: python -m brief.booking_page <out.html>   (needs BITRIX_WEBHOOK_URL)
@@ -16,7 +16,7 @@ from brief.bitrix import make_call, visits
 from brief.dates import OMSK, omsk_today
 
 DAYS_AHEAD = 62
-OPEN, CLOSE = "10:00", "22:00"  # bath hours from the booking resource (Mondays open at 16:00)
+OPEN, CLOSE = "10:00", "22:00"  # conservative bounds for visits with unknown times
 FORM_ID, FORM_SEC = 29, "49w4ka"  # CRM form «Заявка на запись (страница с календарём)»
 FORM_LOADER = "https://cdn-ru.bitrix24.ru/b38758868/crm/form/loader_29.js"
 OFERTA = "https://danilovhouse.ru/p/oferta/"
@@ -38,6 +38,10 @@ def busy_days(vs: list[dict]) -> dict[str, list[list[str]]]:
         if end is None:
             raw.setdefault(day, []).append((f"{start:%H:%M}", CLOSE))
             continue
+        # Public spans have minute precision: round outward so no occupied second
+        # (or the cleanup following it) can accidentally become available.
+        if end.second or end.microsecond:
+            end = (end + timedelta(minutes=1)).replace(second=0, microsecond=0)
         # A visit past midnight occupies each day it touches until its end.
         cur = start
         while cur.date() < end.date():
@@ -58,6 +62,8 @@ def busy_days(vs: list[dict]) -> dict[str, list[list[str]]]:
 
 
 CLEANUP = 60  # minutes after every visit before the next guests can arrive
+SLOTS = (("morning", "Утренний", "10:00", "13:00"),
+         ("daytime", "Дневной", "15:00", "21:00"))
 
 
 def _minutes(hhmm: str) -> int:
@@ -65,46 +71,29 @@ def _minutes(hhmm: str) -> int:
     return int(h) * 60 + int(m)
 
 
-def _hhmm(m: int) -> str:
-    return f"{m // 60:02d}:{m % 60:02d}"
+def day_slots(spans: list[list[str]]) -> list[dict]:
+    """Fixed slots, allowing cleanup after both existing and requested visits.
 
-
-def day_rules(day: date) -> tuple[int, int, int, int]:
-    """(open, close, shortest window, latest start) in minutes for a weekday.
-
-    A window must hold a program plus cleanup: 5 h on ordinary days (4 h program + 1 h),
-    3 h on Tuesdays, which run the short «Банный вторник» programs.
+    Half-open intervals permit the next visit to start exactly when cleanup ends.
     """
-    tuesday = day.weekday() == 1
-    opens = 16 * 60 if day.weekday() == 0 else 10 * 60
-    return opens, 22 * 60, (3 if tuesday else 5) * 60, (19 if tuesday else 16) * 60
-
-
-def start_ranges(day: date, spans: list[list[str]]) -> list[list[str]]:
-    """[["HH:MM", "HH:MM"], ...]: when a new program may start on this day."""
-    opens, closes, shortest, latest = day_rules(day)
-    gaps, cur = [], opens
-    for f, t in sorted((_minutes(f), _minutes(t) + CLEANUP) for f, t in spans):
-        if f > cur:
-            gaps.append((cur, min(f, closes)))
-        cur = max(cur, t)
-    if cur < closes:
-        gaps.append((cur, closes))
-    out = []
-    for a, b in gaps:
-        last = min(latest, b - shortest)
-        if last >= a:
-            out.append([_hhmm(a), _hhmm(last)])
-    return out
+    busy = [(_minutes(f), _minutes(t) + CLEANUP) for f, t in spans]
+    return [{"id": slot_id, "label": label, "start": start, "end": end,
+             "available": not any(_minutes(start) < t and f < _minutes(end) + CLEANUP
+                                  for f, t in busy)}
+            for slot_id, label, start, end in SLOTS]
 
 
 def availability(busy: dict[str, list[list[str]]], today: date) -> dict[str, dict]:
-    """Per day of the public horizon: {"visits": bool, "starts": start ranges}."""
+    """Per day of the public horizon: {"slots": [{id, label, start, end, available}]}.
+
+    Only anonymized slot availability leaves this module; the client also rejects
+    slots whose start time has passed in Asia/Omsk since this static page was built.
+    """
     out = {}
     for i in range(DAYS_AHEAD):
         day = today + timedelta(days=i)
         spans = busy.get(day.isoformat(), [])
-        out[day.isoformat()] = {"visits": bool(spans), "starts": start_ranges(day, spans)}
+        out[day.isoformat()] = {"slots": day_slots(spans)}
     return out
 
 
@@ -137,6 +126,14 @@ font:inherit;font-size:15px;border:2px solid transparent;cursor:pointer;padding:
 .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:13px;color:var(--muted);margin-top:10px}
 .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:4px}
 .info{margin-top:10px;padding:10px 12px;border-radius:10px;background:#f7f5f0;font-size:14px;min-height:42px}
+.slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px}
+.slot{font:inherit;text-align:left;border:2px solid var(--line);border-radius:12px;padding:12px;background:var(--free);color:var(--ink);cursor:pointer}
+.slot span,.slot small{display:block}
+.slot-name{font-weight:600}.slot-time{font-size:19px;margin:4px 0}.slot small{font-size:13px;color:var(--free-ink)}
+.slot:disabled{background:var(--past);color:var(--muted);cursor:default}.slot:disabled small{color:var(--muted)}
+.slot.sel{border-color:var(--green)}.slot:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.selection{padding:14px;border:2px solid var(--green);border-radius:12px;background:var(--free);margin-bottom:14px}
+.selection strong{display:block;font-size:20px;margin:4px 0}.selection p{font-size:14px;margin:6px 0 0}
 .note{font-size:13px;color:var(--muted);margin:8px 0 0}
 .terms{font-size:13px;color:var(--muted);background:#f7f5f0;border-radius:10px;padding:10px 12px;margin-bottom:12px}
 .terms ul{margin:6px 0 0;padding-left:18px}
@@ -157,17 +154,20 @@ BODY = """
     </div>
     <div class="grid" id="grid"></div>
     <div class="legend">
-      <span><i style="background:var(--free)"></i>свободно</span>
-      <span><i style="background:var(--part)"></i>есть свободное время</span>
-      <span><i style="background:var(--busy)"></i>занято</span>
+      <span><i style="background:var(--free)"></i>2 свободных слота</span>
+      <span><i style="background:var(--part)"></i>1 свободный слот</span>
+      <span><i style="background:var(--busy)"></i>нет свободных слотов</span>
     </div>
-    <div class="info" id="info" aria-live="polite">Нажмите на день, чтобы узнать, когда можно начать программу.</div>
+    <div class="info" id="info" aria-live="polite">Выберите дату, затем утренний или дневной слот.</div>
+    <div class="slots" id="slots" aria-label="Слоты на выбранную дату"></div>
+    <p class="note">Время указано по Омску.</p>
     <p class="note">Календарь для ориентира, обновлён __UPDATED__ (Омск). Записаться в нём нельзя:
       оставьте заявку ниже, менеджер свяжется и подтвердит дату.</p>
   </div>
 
   <div class="card" id="form">
     <h2>Заявка</h2>
+    <div class="selection" id="selection" aria-live="polite">Выберите дату и слот в календаре выше.</div>
     <div class="terms">
       Заявка не бронирует дату: менеджер свяжется, подтвердит её и пришлёт ссылку на оплату.
       <ul>
@@ -189,51 +189,88 @@ const TODAY = __TODAY__, DAYS = __DAYS__;
 const MONTHS = ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
 const MONTHS_OF = ["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"];
 const WEEKDAYS = ["воскресенье","понедельник","вторник","среда","четверг","пятница","суббота"];
-const pad = n => String(n).padStart(2, "0");
-const iso = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-const start = new Date(TODAY + "T00:00");
-const end = new Date(start); end.setDate(end.getDate() + Object.keys(DAYS).length);
-// Start ranges are computed server-side (brief.booking_page.start_ranges); the page only shows them.
-function state(d) {
-  const x = DAYS[iso(d)];
-  if (!x) return "past";
-  if (!x.visits) return "free";
-  return x.starts.length ? "part" : "busy";
+// Calendar dates use UTC as date-only values; slot instants use Asia/Omsk (UTC+06).
+const iso = d => d.toISOString().slice(0, 10);
+const start = new Date(TODAY + "T00:00:00Z");
+const end = new Date(start); end.setUTCDate(end.getUTCDate() + Object.keys(DAYS).length - 1);
+const slotStart = (day, slot) => Date.parse(`${day}T${slot.start}:00+06:00`);
+const selectable = (day, slot, now) => slot.available && slotStart(day, slot) > now;
+function state(d, now) {
+  const day = iso(d), x = DAYS[day];
+  if (!x || Date.parse(`${day}T00:00:00+06:00`) + 86400000 <= now) return "past";
+  const count = x.slots.filter(slot => selectable(day, slot, now)).length;
+  return count === 2 ? "free" : count === 1 ? "part" : "busy";
 }
-const first = new Date(start.getFullYear(), start.getMonth(), 1);
-const lastMonth = new Date(end.getFullYear(), end.getMonth(), 1);
-let view = first, selected = null;
+const first = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+const lastMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+let view = first, selected = null, selectedSlot = null;
 
-function render() {
-  document.getElementById("month").textContent = `${MONTHS[view.getMonth()]} ${view.getFullYear()}`;
+function render(now) {
+  document.getElementById("month").textContent = `${MONTHS[view.getUTCMonth()]} ${view.getUTCFullYear()}`;
   document.getElementById("prev").disabled = view <= first;
   document.getElementById("next").disabled = view >= lastMonth;
   const g = document.getElementById("grid");
   g.innerHTML = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"].map(x => `<div class="dow">${x}</div>`).join("");
-  for (let i = 0; i < (view.getDay() + 6) % 7; i++) g.insertAdjacentHTML("beforeend", '<div class="day empty"></div>');
-  const n = new Date(view.getFullYear(), view.getMonth() + 1, 0).getDate();
+  for (let i = 0; i < (view.getUTCDay() + 6) % 7; i++) g.insertAdjacentHTML("beforeend", '<div class="day empty"></div>');
+  const n = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() + 1, 0)).getUTCDate();
   for (let k = 1; k <= n; k++) {
-    const d = new Date(view.getFullYear(), view.getMonth(), k), s = state(d);
+    const d = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth(), k)), s = state(d, now);
     const el = document.createElement(s === "past" ? "div" : "button");
     el.className = `day ${s}` + (selected === iso(d) ? " sel" : "");
-    el.innerHTML = `${k}` + (d.getDay() === 2 && s !== "past" ? "<small>вторник</small>" : "");
-    if (s !== "past") { el.type = "button"; el.onclick = () => pick(d); }
+    el.textContent = k;
+    if (s !== "past") {
+      el.type = "button"; el.dataset.date = iso(d);
+      el.setAttribute("aria-pressed", String(selected === iso(d)));
+      el.onclick = () => pick(d);
+    }
     g.appendChild(el);
   }
 }
 function pick(d) {
-  selected = iso(d);
-  const s = state(d), title = `${d.getDate()} ${MONTHS_OF[d.getMonth()]}, ${WEEKDAYS[d.getDay()]}`;
-  const when = DAYS[iso(d)].starts.map(([f, t]) => f === t ? `в ${f}` : `с ${f} до ${t}`).join(" или ");
-  let text = s === "busy" ? `<b>${title}</b>: день занят, выберите другую дату.`
-    : `<b>${title}</b>: можно начать программу ${when}. Укажите эту дату в заявке ниже.`;
-  if (d.getDay() === 2) text += " По вторникам проходят программы «Банного вторника».";
-  document.getElementById("info").innerHTML = text;
-  render();
+  if (state(d, Date.now()) === "past") return refresh();
+  selected = iso(d); selectedSlot = null;
+  refresh();
 }
-document.getElementById("prev").onclick = () => { view = new Date(view.getFullYear(), view.getMonth() - 1, 1); render(); };
-document.getElementById("next").onclick = () => { view = new Date(view.getFullYear(), view.getMonth() + 1, 1); render(); };
-render();
+function refresh() {
+  const now = Date.now(), slots = DAYS[selected]?.slots || [];
+  const choice = slots.find(slot => slot.id === selectedSlot);
+  if (choice && !selectable(selected, choice, now)) selectedSlot = null;
+  render(now);
+  const panel = document.getElementById("slots"), summary = document.getElementById("selection");
+  panel.innerHTML = "";
+  if (!selected) {
+    summary.textContent = "Выберите дату и слот в календаре выше.";
+    return;
+  }
+  const d = new Date(selected + "T00:00:00Z");
+  const title = `${d.getUTCDate()} ${MONTHS_OF[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${WEEKDAYS[d.getUTCDay()]}`;
+  const hasFree = slots.some(slot => selectable(selected, slot, now));
+  document.getElementById("info").innerHTML = `<b>${title}</b>: ` +
+    (hasFree ? "выберите свободный слот." : "свободных слотов нет, выберите другую дату.");
+  for (const slot of slots) {
+    const el = document.createElement("button"), chosen = slot.id === selectedSlot;
+    el.type = "button"; el.dataset.slotId = slot.id;
+    el.className = "slot" + (chosen ? " sel" : "");
+    el.disabled = !selectable(selected, slot, now);
+    el.setAttribute("aria-pressed", String(chosen));
+    const status = !slot.available ? "Занят" : el.disabled ? "Время прошло" : chosen ? "Выбран" : "Свободен";
+    el.innerHTML = `<span class="slot-name">${slot.label}</span><span class="slot-time">${slot.start}–${slot.end}</span><small>${status}</small>`;
+    el.onclick = () => {
+      if (selectable(selected, slot, Date.now())) selectedSlot = slot.id;
+      refresh();
+    };
+    panel.appendChild(el);
+  }
+  const chosen = slots.find(slot => slot.id === selectedSlot);
+  summary.innerHTML = "Выбор для заявки:<strong>" + title + "</strong>" +
+    (chosen ? `<strong>${chosen.label} ${chosen.start}–${chosen.end} (Омск)</strong><p>Укажите дату и слот в заявке ниже. Менеджер подтвердит запись.</p>`
+      : `<p>${hasFree ? "Выберите доступный слот в календаре выше." : "На эту дату нет свободных слотов."}</p>`);
+}
+document.getElementById("prev").onclick = () => { view = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() - 1, 1)); refresh(); };
+document.getElementById("next").onclick = () => { view = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() + 1, 1)); refresh(); };
+document.addEventListener("visibilitychange", refresh);
+setInterval(refresh, 30000);
+refresh();
 """
 
 
