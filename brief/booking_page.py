@@ -1,9 +1,8 @@
 """Public booking page: a read-only availability calendar over the Bitrix CRM form.
 
-Busy time comes from CRM deals («Время записи» + «Длительность, часов»); only start and
-end times leave Bitrix — no names, sums or deal ids. A guest sees two fixed daily slots,
-chooses a compatible program, then leaves a request in the embedded Bitrix form;
-the manager confirms by phone.
+Busy time comes from CRM deals («Время записи» + «Длительность, часов»). The public
+page contains fixed slot availability and available start ranges by visit duration.
+The guest chooses a program and time, then requests confirmation through the form.
 
 Usage: python -m brief.booking_page <out.html>   (needs BITRIX_WEBHOOK_URL)
 """
@@ -17,22 +16,23 @@ from brief.bitrix import make_call, visits
 from brief.dates import OMSK, omsk_today
 
 DAYS_AHEAD = 62
-OPEN, CLOSE = "10:00", "22:00"  # conservative bounds for visits with unknown times
+OPEN, CLOSE = "10:00", "22:00"
+FLEX_PRICE = 60_000
 FORM_ID, FORM_SEC = 29, "49w4ka"  # CRM form «Заявка на запись (страница с календарём)»
 FORM_LOADER = "https://cdn-ru.bitrix24.ru/b38758868/crm/form/loader_29.js"
 OFERTA = "https://danilovhouse.ru/p/oferta/"
 # Public catalog order; IDs refer to the existing Bitrix «Желаемая программа» options.
 PROGRAMS = (
-    ("na-dvoih-2-5-chasa", "147", "На двоих — 2,5 часа", 150),
-    ("na-dvoih-3-chasa", "149", "На двоих — 3 часа", 180),
-    ("na-dvoih-4-chasa", "151", "На двоих — 4 часа", 240),
-    ("na-dvoih-5-chasov", "153", "На двоих — 5 часов", 300),
-    ("legkiy-par", "141", "Лёгкий пар (4–5 часов, до 12 гостей)", 300),
-    ("stihiya", "143", "Стихия (4–5 часов, до 8 гостей)", 300),
-    ("deviche-teplo", "119", "Девичье тепло (5–6 часов, 2–12 гостей)", 360),
-    ("zhenskaya-stihiya", "121", "Женская стихия (5–6 часов, до 8 гостей)", 360),
-    ("sila-ognya", "123", "Сила огня (5–6 часов, 2–12 гостей)", 360),
-    ("muzhskaya-zakalka", "125", "Мужская закалка (5–6 часов, 2–8 гостей)", 360),
+    ("na-dvoih-2-5-chasa", "147", "На двоих — 2,5 часа", 150, 20_000),
+    ("na-dvoih-3-chasa", "149", "На двоих — 3 часа", 180, 25_000),
+    ("na-dvoih-4-chasa", "151", "На двоих — 4 часа", 240, 30_000),
+    ("na-dvoih-5-chasov", "153", "На двоих — 5 часов", 300, 40_000),
+    ("legkiy-par", "141", "Лёгкий пар (4–5 часов, до 12 гостей)", 300, 60_000),
+    ("stihiya", "143", "Стихия (4–5 часов, до 8 гостей)", 300, 60_000),
+    ("deviche-teplo", "119", "Девичье тепло (5–6 часов, 2–12 гостей)", 360, 60_000),
+    ("zhenskaya-stihiya", "121", "Женская стихия (5–6 часов, до 8 гостей)", 360, 60_000),
+    ("sila-ognya", "123", "Сила огня (5–6 часов, 2–12 гостей)", 360, 60_000),
+    ("muzhskaya-zakalka", "125", "Мужская закалка (5–6 часов, 2–8 гостей)", 360, 60_000),
 )
 
 
@@ -40,7 +40,8 @@ def busy_days(vs: list[dict]) -> dict[str, list[list[str]]]:
     """{"YYYY-MM-DD": [["HH:MM", "HH:MM"], ...]} sorted and merged.
 
     A visit without a time or a duration is treated as busy until closing: an unknown
-    end must not show a guest a window that is in fact taken.
+    end must not show a guest a window that is in fact taken. A visit starting
+    after closing still blocks new visits whose cleanup would run into it.
     """
     raw: dict[str, list[tuple[str, str]]] = {}
     for v in vs:
@@ -50,7 +51,8 @@ def busy_days(vs: list[dict]) -> dict[str, list[list[str]]]:
             raw.setdefault(day, []).append((OPEN, CLOSE))
             continue
         if end is None:
-            raw.setdefault(day, []).append((f"{start:%H:%M}", CLOSE))
+            start_time = f"{start:%H:%M}"
+            raw.setdefault(day, []).append((start_time, CLOSE if start_time < CLOSE else "24:00"))
             continue
         # Public spans have minute precision: round outward so no occupied second
         # (or the cleanup following it) can accidentally become available.
@@ -76,7 +78,7 @@ def busy_days(vs: list[dict]) -> dict[str, list[list[str]]]:
 
 
 CLEANUP = 60  # minutes after every visit before the next guests can arrive
-SLOTS = (("morning", "Утренний", "10:00", "13:00"),
+SLOTS = (("morning", "Утренний", "10:00", "14:00"),
          ("daytime", "Дневной", "15:00", "21:00"))
 
 
@@ -97,17 +99,39 @@ def day_slots(spans: list[list[str]]) -> list[dict]:
             for slot_id, label, start, end in SLOTS]
 
 
-def availability(busy: dict[str, list[list[str]]], today: date) -> dict[str, dict]:
-    """Per day of the public horizon: {"slots": [{id, label, start, end, available}]}.
+def _clock(minutes: int) -> str:
+    hour, minute = divmod(minutes, 60)
+    return f"{hour:02}:{minute:02}"
 
-    Only anonymized slot availability leaves this module; the client also rejects
-    slots whose start time has passed in Asia/Omsk since this static page was built.
-    """
+
+def start_ranges(spans: list[list[str]], duration: int) -> list[list[str]]:
+    """Inclusive ranges of whole-minute starts with a full visit and cleanup between guests."""
+    ranges = []
+    earliest = _minutes(OPEN)
+    last = _minutes(CLOSE) - duration
+    for start, end in spans:  # busy_days provides sorted, merged intervals
+        before_visit = min(last, _minutes(start) - CLEANUP - duration)
+        if earliest <= before_visit:
+            ranges.append([_clock(earliest), _clock(before_visit)])
+        earliest = max(earliest, _minutes(end) + CLEANUP)
+        if earliest > last:
+            return ranges
+    if earliest <= last:
+        ranges.append([_clock(earliest), _clock(last)])
+    return ranges
+
+
+def availability(busy: dict[str, list[list[str]]], today: date) -> dict[str, dict]:
+    """Publish derived availability only, without the underlying occupied intervals."""
+    durations = sorted({duration for _, _, _, duration, price in PROGRAMS if price >= FLEX_PRICE})
     out = {}
     for i in range(DAYS_AHEAD):
-        day = today + timedelta(days=i)
-        spans = busy.get(day.isoformat(), [])
-        out[day.isoformat()] = {"slots": day_slots(spans)}
+        day = (today + timedelta(days=i)).isoformat()
+        spans = busy.get(day, [])
+        out[day] = {
+            "slots": day_slots(spans),
+            "starts": {str(duration): start_ranges(spans, duration) for duration in durations},
+        }
     return out
 
 
@@ -121,10 +145,14 @@ h1{font-size:24px;margin:0 0 4px;color:var(--green)}
 .lead{color:var(--muted);margin:0 0 16px}
 .card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 h2{font-size:17px;margin:0 0 12px}
-.program{margin:0 0 16px}.program label{display:block;font-weight:600;margin-bottom:5px}
-.program select{width:100%;border:1px solid var(--line);border-radius:8px;background:#fff;
+.program{margin:0 0 16px}.program label,.flex-choice label{display:block;font-weight:600;margin-bottom:5px}
+.program select,.flex-choice select,.flex-choice input{width:100%;border:1px solid var(--line);border-radius:8px;background:#fff;
 font:inherit;color:var(--ink);padding:9px 8px}
-.program select:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.program select:focus-visible,.flex-choice :is(select,input):focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.flex-choice{margin-top:10px}
+.flex-choice .range-picker{margin-bottom:10px}
+.flex-choice .note{margin:4px 0 8px}
+#time-error{color:var(--busy-ink)}#time-error:empty{display:none}
 #form-status:empty{display:none}
 #booking-crm{border:0;margin:0;padding:0;min-inline-size:0}
 #booking-crm [data-booking-synced]{display:none!important}
@@ -172,7 +200,10 @@ BODY = """
       <select id="program" aria-describedby="program-help">
         <option value="">Выберите программу</option>
       </select>
-      <p class="note" id="program-help" aria-live="polite"></p>
+      <p class="note" id="program-help">Программы дешевле 60 000 ₽ начинаются в 10:00 или 15:00.
+        Утреннее время подходит для программ до четырёх часов.
+        Для программ от 60 000 ₽ выберите удобное время начала, чтобы закончить к 22:00.
+        Между визитами мы оставляем час на уборку.</p>
     </div>
     <h2>Свободные даты</h2>
     <div class="cal-head">
@@ -182,12 +213,22 @@ BODY = """
     </div>
     <div class="grid" id="grid"></div>
     <div class="legend">
-      <span><i style="background:var(--free)"></i>2 доступных слота</span>
-      <span><i style="background:var(--part)"></i>1 доступный слот</span>
-      <span><i style="background:var(--busy)"></i>нет доступных слотов</span>
+      <span><i style="background:var(--free)"></i>свободно</span>
+      <span><i style="background:var(--part)"></i>частично свободно</span>
+      <span><i style="background:var(--busy)"></i>нет свободного времени</span>
     </div>
-    <div class="info" id="info" aria-live="polite">Выберите дату, затем утренний или дневной слот.</div>
+    <div class="info" id="info" aria-live="polite">Выберите дату и время.</div>
     <div class="slots" id="slots" aria-label="Слоты на выбранную дату"></div>
+    <div class="flex-choice" id="flex-choice" hidden>
+      <div class="range-picker" id="range-picker" hidden>
+        <label for="start-range">Доступный диапазон начала</label>
+        <select id="start-range"></select>
+      </div>
+      <label for="start-time">Время начала</label>
+      <p class="note" id="time-range"></p>
+      <input id="start-time" type="time" step="60" aria-describedby="time-range time-error">
+      <p class="note" id="time-error" aria-live="polite"></p>
+    </div>
     <p class="note">Время указано по Омску.</p>
     <p class="note">Календарь для ориентира, обновлён __UPDATED__ (Омск). Записаться в нём нельзя:
       оставьте заявку ниже, менеджер свяжется и подтвердит дату.</p>
@@ -195,7 +236,7 @@ BODY = """
 
   <div class="card" id="form">
     <h2>Заявка</h2>
-    <div class="selection" id="selection" aria-live="polite">Выберите дату и слот в календаре выше.</div>
+    <div class="selection" id="selection" aria-live="polite">Выберите программу, дату и время в календаре выше.</div>
     <div class="terms">
       Заявка не бронирует дату: менеджер свяжется, подтвердит её и пришлёт ссылку на оплату.
       <ul>
@@ -214,7 +255,8 @@ BODY = """
 
 SCRIPT = r"""
 const TODAY = __TODAY__, DAYS = __DAYS__;
-const PROGRAMS = new Map(__PROGRAMS__.map(([slug, id, label, duration]) => [slug, {id, label, duration}]));
+const FLEX_PRICE = __FLEX_PRICE__, OPEN = "__OPEN__", CLOSE = "__CLOSE__";
+const PROGRAMS = new Map(__PROGRAMS__.map(([slug, id, label, duration, price]) => [slug, {id, label, duration, price}]));
 const CRM_FIELDS = {
   date: "DEAL_UF_CRM_WISH_DATE",
   program: "DEAL_UF_CRM_WISH_PROGRAM",
@@ -223,6 +265,9 @@ const CRM_FIELDS = {
 const programSelect = document.getElementById("program");
 const crm = document.getElementById("booking-crm");
 const formStatus = document.getElementById("form-status");
+const timeInput = document.getElementById("start-time");
+const rangeSelect = document.getElementById("start-range");
+const timeError = document.getElementById("time-error");
 for (const [slug, program] of PROGRAMS) {
   programSelect.add(new Option(program.label, slug));
 }
@@ -236,26 +281,55 @@ const WEEKDAYS = ["воскресенье","понедельник","вторн�
 const iso = d => d.toISOString().slice(0, 10);
 const start = new Date(TODAY + "T00:00:00Z");
 const end = new Date(start); end.setUTCDate(end.getUTCDate() + Object.keys(DAYS).length - 1);
-const slotStart = (day, slot) => Date.parse(`${day}T${slot.start}:00+06:00`);
+const localMidnight = day => Date.parse(`${day}T00:00:00+06:00`);
 const minutes = time => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+const clock = minute => [Math.floor(minute / 60), minute % 60].map(n => String(n).padStart(2, "0")).join(":");
+const isFlexible = program => program?.price >= FLEX_PRICE;
 const fits = (program, slot) => !program || program.duration <= minutes(slot.end) - minutes(slot.start);
-function slotStatus(day, slot, now) {
+const nextMinute = (day, now) => Math.floor((now - localMidnight(day)) / 60000) + 1;
+function slotStatus(day, slot, program, now) {
+  if (!fits(program, slot)) return "Для программ до " + (minutes(slot.end) - minutes(slot.start)) / 60 + " ч";
   if (!slot.available) return "Занят";
-  if (slotStart(day, slot) <= now) return "Время прошло";
-  if (!fits(currentProgram(), slot)) return "Для программ до 3 часов";
+  if (minutes(slot.start) < nextMinute(day, now)) return "Время прошло";
   return "";
 }
-const selectable = (day, slot, now) => !slotStatus(day, slot, now);
+function flexRanges(day, duration, now) {
+  const earliest = nextMinute(day, now);
+  return (DAYS[day]?.starts[duration] || [])
+    .map(([from, to]) => [Math.max(minutes(from), earliest), minutes(to)])
+    .filter(([from, to]) => from <= to);
+}
+const contains = ([from, to], minute) => minute !== null && minute >= from && minute <= to;
+const someFlexTime = (day, now) => Object.keys(DAYS[day].starts)
+  .some(duration => flexRanges(day, duration, now).length > 0);
 function state(d, now) {
-  const day = iso(d), x = DAYS[day];
-  if (!x || Date.parse(`${day}T00:00:00+06:00`) + 86400000 <= now) return "past";
-  const count = x.slots.filter(slot => selectable(day, slot, now)).length;
-  return count === 2 ? "free" : count === 1 ? "part" : "busy";
+  const day = iso(d), data = DAYS[day], program = currentProgram();
+  if (!data || localMidnight(day) + 86400000 <= now) return "past";
+  if (isFlexible(program)) {
+    const ranges = flexRanges(day, program.duration, now);
+    if (!ranges.length) return "busy";
+    const [from, to] = ranges[0];
+    return from === minutes(OPEN) && to === minutes(CLOSE) - program.duration ? "free" : "part";
+  }
+  const compatible = data.slots.filter(slot => fits(program, slot));
+  const count = compatible.filter(slot => !slotStatus(day, slot, program, now)).length;
+  if (count) return count === compatible.length ? "free" : "part";
+  return !program && someFlexTime(day, now) ? "part" : "busy";
 }
 const first = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
 const lastMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
-let view = first, selected = null, selectedSlot = null, nativeForm = null;
-const activeSlot = () => DAYS[selected]?.slots.find(slot => slot.id === selectedSlot);
+let view = first, selected = null, selectedStart = null, nativeForm = null;
+
+function activeChoice(now) {
+  if (!selected || selectedStart === null) return null;
+  const program = currentProgram();
+  if (isFlexible(program)) {
+    if (!flexRanges(selected, program.duration, now).some(range => contains(range, selectedStart))) return null;
+    return {start: clock(selectedStart), end: clock(selectedStart + program.duration)};
+  }
+  return DAYS[selected].slots.find(slot => minutes(slot.start) === selectedStart &&
+    !slotStatus(selected, slot, program, now)) || null;
+}
 
 function crmSelection() {
   return {
@@ -264,7 +338,7 @@ function crmSelection() {
   };
 }
 
-function syncForm(now) {
+function syncForm(choice) {
   if (!nativeForm) return;
   const expected = crmSelection();
   const current = nativeForm.values();
@@ -273,8 +347,7 @@ function syncForm(now) {
   }
   const actual = nativeForm.values();
   const fieldsMatch = Object.entries(expected).every(([name, value]) => (actual[name]?.[0] || "") === value);
-  const chosen = activeSlot();
-  crm.disabled = !fieldsMatch || !currentProgram() || !chosen || !selectable(selected, chosen, now);
+  crm.disabled = !fieldsMatch || !currentProgram() || !choice;
   formStatus.textContent = fieldsMatch ? "" : "Не удалось передать выбор в заявку. Обновите страницу и попробуйте снова.";
 }
 
@@ -299,13 +372,14 @@ function connectForm(event) {
   });
   let restoreComment = null;
   form.subscribe("submit", data => {
-    refresh();
+    restoreComment?.();
+    const choice = refresh();
     if (crm.disabled) {
-      data.promise = Promise.reject(new Error("Выберите программу, дату и доступный слот."));
+      data.promise = Promise.reject(new Error("Выберите программу, дату и доступное время."));
       return;
     }
-    const slot = activeSlot();
-    const note = `Желаемый слот: ${slot.start}–${slot.end} (Омск)`;
+    const heading = isFlexible(currentProgram()) ? "Желаемое время" : "Желаемый слот";
+    const note = `${heading}: ${choice.start}–${choice.end} (Омск)`;
     const comment = form.values()[CRM_FIELDS.comment]?.[0] || "";
     const submitted = comment ? `${note}\n\n${comment}` : note;
     form.setValues({[CRM_FIELDS.comment]: submitted});
@@ -345,68 +419,100 @@ function render(now) {
 }
 function pick(d) {
   if (state(d, Date.now()) === "past") return refresh();
-  selected = iso(d); selectedSlot = null;
+  selected = iso(d);
+  selectedStart = null;
+  rangeSelect.value = "";
   refresh();
 }
-function refresh() {
-  const now = Date.now();
-  if (selected && state(new Date(selected + "T00:00:00Z"), now) === "past") {
-    selected = null;
-    selectedSlot = null;
+
+function renderFlexible(ranges, preserveDraft) {
+  const editor = document.getElementById("flex-choice");
+  editor.hidden = ranges.length === 0;
+  timeInput.disabled = editor.hidden;
+  if (editor.hidden) {
+    timeInput.value = "";
+    return;
   }
-  const slots = DAYS[selected]?.slots || [];
-  const previousSlot = activeSlot();
-  if (previousSlot && !selectable(selected, previousSlot, now)) selectedSlot = null;
-  const chosen = activeSlot();
-  const program = currentProgram();
-  for (const option of programSelect.options) {
-    option.disabled = Boolean(chosen && !fits(PROGRAMS.get(option.value), chosen));
-  }
-  document.getElementById("program-help").textContent = chosen?.id === "morning"
-    ? "Утром доступны программы до 3 часов. Для более долгой программы выберите дневной слот."
-    : "Для программ на 4–6 часов подходит дневной слот 15:00–21:00.";
+  const oldRange = rangeSelect.value;
+  const nextOptions = ranges.map(([from, to]) => `<option value="${from}">${clock(from)}–${clock(to)}</option>`).join("");
+  if (rangeSelect.innerHTML !== nextOptions) rangeSelect.innerHTML = nextOptions;
+  document.getElementById("range-picker").hidden = ranges.length < 2;
+  const chosen = ranges.find(range => contains(range, selectedStart));
+  const [from, to] = chosen || ranges.find(range => String(range[0]) === oldRange) || ranges[0];
+  rangeSelect.value = String(from);
+  timeInput.min = clock(from);
+  timeInput.max = clock(to);
+  if (!preserveDraft) timeInput.value = chosen ? clock(selectedStart) : "";
+  const invalid = timeInput.value && !timeInput.validity.valid;
+  timeInput.setAttribute("aria-invalid", String(Boolean(invalid)));
+  timeError.textContent = invalid ? "Выберите время в доступном диапазоне." : "";
+  document.getElementById("time-range").textContent = from === to
+    ? `Доступное начало — ${clock(from)}.`
+    : `В пределах ${clock(from)}–${clock(to)}, с точностью до минуты.`;
+}
+
+function refresh(preserveDraft = false) {
+  const now = Date.now(), program = currentProgram(), flexible = isFlexible(program);
+  if (selected && state(new Date(selected + "T00:00:00Z"), now) === "past") selected = null;
+  const choice = activeChoice(now);
+  if (!choice) selectedStart = null;
+  const data = DAYS[selected];
+  const ranges = flexible && data ? flexRanges(selected, program.duration, now) : [];
   render(now);
-  syncForm(now);
+  syncForm(choice);
+  renderFlexible(ranges, preserveDraft);
   const panel = document.getElementById("slots"), summary = document.getElementById("selection");
   const info = document.getElementById("info");
   const programLine = program ? `<strong>${program.label}</strong>` : "";
-  panel.innerHTML = "";
+  panel.replaceChildren();
   if (!selected) {
-    info.textContent = "Выберите дату, затем утренний или дневной слот.";
-    summary.innerHTML = programLine + "<p>Выберите дату и слот в календаре выше.</p>";
-    return;
+    info.textContent = "Выберите дату и время.";
+    summary.innerHTML = programLine + "<p>Выберите программу, дату и время в календаре выше.</p>";
+    return choice;
   }
   const d = new Date(selected + "T00:00:00Z");
   const title = `${d.getUTCDate()} ${MONTHS_OF[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${WEEKDAYS[d.getUTCDay()]}`;
-  const hasFree = slots.some(slot => selectable(selected, slot, now));
-  info.innerHTML = `<b>${title}</b>. ` +
-    (hasFree ? "Выберите свободный слот." : "Подходящих свободных слотов нет. Выберите другую дату.");
-  for (const slot of slots) {
-    const el = document.createElement("button"), chosen = slot.id === selectedSlot;
+  const fixed = flexible ? [] : data.slots;
+  const freeFixed = fixed.some(slot => !slotStatus(selected, slot, program, now));
+  const needsProgram = !program && !freeFixed && someFlexTime(selected, now);
+  const nextChoice = ranges.length ? "Укажите время начала." : freeFixed ? "Выберите свободный слот."
+    : needsProgram ? "Выберите программу от 60 000 ₽, чтобы увидеть свободное время начала."
+    : "Подходящего свободного времени нет. Выберите другую дату.";
+  info.innerHTML = `<b>${title}</b>. ${nextChoice}`;
+  for (const slot of fixed) {
+    const el = document.createElement("button"), chosen = slot.id === choice?.id;
     el.type = "button"; el.dataset.slotId = slot.id;
     el.className = "slot" + (chosen ? " sel" : "");
-    const unavailable = slotStatus(selected, slot, now);
+    const unavailable = slotStatus(selected, slot, program, now);
     el.disabled = Boolean(unavailable);
     el.setAttribute("aria-pressed", String(chosen));
     const status = unavailable || (chosen ? "Выбран" : "Свободен");
     el.innerHTML = `<span class="slot-name">${slot.label}</span><span class="slot-time">${slot.start}–${slot.end}</span><small>${status}</small>`;
     el.onclick = () => {
-      if (selectable(selected, slot, Date.now())) selectedSlot = slot.id;
+      if (!slotStatus(selected, slot, currentProgram(), Date.now())) selectedStart = minutes(slot.start);
       refresh();
     };
     panel.appendChild(el);
   }
-  const slotLine = chosen ? `<strong>${chosen.label} ${chosen.start}–${chosen.end} (Омск)</strong>` : "";
-  const nextStep = chosen && program ? "Оставьте контакты ниже. Менеджер подтвердит запись."
-    : chosen ? "Выберите программу над календарём."
-    : hasFree ? "Выберите доступный слот в календаре выше." : "Выберите другую дату в календаре.";
-  summary.innerHTML = `Ваш выбор<strong>${title}</strong>${slotLine}${programLine}<p>${nextStep}</p>`;
+  const timeLine = choice ? `<strong>${choice.label || "Время"} ${choice.start}–${choice.end} (Омск)</strong>` : "";
+  const nextStep = choice && program ? "Оставьте контакты ниже. Менеджер подтвердит запись."
+    : choice ? "Выберите программу над календарём." : nextChoice;
+  summary.innerHTML = `Ваш выбор<strong>${title}</strong>${timeLine}${programLine}<p>${nextStep}</p>`;
+  return choice;
 }
-programSelect.addEventListener("change", refresh);
+programSelect.addEventListener("change", () => refresh());
+rangeSelect.addEventListener("change", () => {
+  selectedStart = null;
+  refresh();
+});
+timeInput.addEventListener("input", () => {
+  selectedStart = timeInput.value && timeInput.validity.valid ? minutes(timeInput.value) : null;
+  refresh(true);
+});
 document.getElementById("prev").onclick = () => { view = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() - 1, 1)); refresh(); };
 document.getElementById("next").onclick = () => { view = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() + 1, 1)); refresh(); };
-document.addEventListener("visibilitychange", refresh);
-setInterval(refresh, 30000);
+document.addEventListener("visibilitychange", () => refresh(true));
+setInterval(() => refresh(true), 30000);
 refresh();
 
 const loader = document.createElement("script");
@@ -423,6 +529,7 @@ def render(busy: dict, today: date, updated: datetime) -> str:
     script = (SCRIPT.replace("__TODAY__", json.dumps(today.isoformat()))
               .replace("__DAYS__", json.dumps(availability(busy, today)))
               .replace("__PROGRAMS__", json.dumps(PROGRAMS, ensure_ascii=False))
+              .replace("__FLEX_PRICE__", str(FLEX_PRICE)).replace("__OPEN__", OPEN).replace("__CLOSE__", CLOSE)
               .replace("__FORM_ID__", str(FORM_ID)).replace("__FORM_LOADER__", FORM_LOADER))
     return ("<!doctype html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
