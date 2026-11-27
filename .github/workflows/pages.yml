@@ -4,7 +4,9 @@ name: pages
 
 on:
   schedule:
-    - cron: "5 * * * *"  # every hour at :05 UTC; GitHub may start a few minutes late
+    # Twice an hour, off the busy top of the hour. GitHub often delays or drops
+    # scheduled runs, so this is only a fallback for an external trigger.
+    - cron: "23,53 * * * *"
   workflow_dispatch:
   push:
     branches: [main]
@@ -24,7 +26,7 @@ jobs:
     timeout-minutes: 10
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url || steps.deploy_retry.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -39,4 +41,13 @@ jobs:
         with:
           path: site
       - id: deploy
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+      # Pages deploys fail now and then on GitHub's side ("Fetching artifact
+      # metadata failed"); one retry after a short pause covers that.
+      - name: Wait before retrying the deploy
+        if: steps.deploy.outcome == 'failure'
+        run: sleep 30
+      - id: deploy_retry
+        if: steps.deploy.outcome == 'failure'
         uses: actions/deploy-pages@v4
