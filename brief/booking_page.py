@@ -17,23 +17,36 @@ from brief.dates import OMSK, omsk_today
 
 DAYS_AHEAD = 62
 OPEN, CLOSE = "10:00", "22:00"
-FLEX_PRICE = 60_000
 FLEX_LAST_START = "16:00"
 FORM_ID, FORM_SEC = 29, "49w4ka"  # CRM form «Заявка на запись (страница с календарём)»
 FORM_LOADER = "https://cdn-ru.bitrix24.ru/b38758868/crm/form/loader_29.js"
-OFERTA = "https://danilovhouse.ru/p/oferta/"
-# Public catalog order; IDs refer to the existing Bitrix «Желаемая программа» options.
+OFERTA = "https://danilovhouse.ru/oferta.html"
+# Public catalog order; IDs refer to the Bitrix «Желаемая программа» (UF_CRM_WISH_PROGRAM) options.
+# Tuple: (slug, Bitrix option ID, label, minutes, base price, flexible start). Flexible start
+# (any free hour 10:00–16:00) is for groups of 9–14 guests; the rest use the fixed slots.
 PROGRAMS = (
-    ("na-dvoih-2-5-chasa", "147", "На двоих — 2,5 часа", 150, 20_000),
-    ("na-dvoih-3-chasa", "149", "На двоих — 3 часа", 180, 25_000),
-    ("na-dvoih-4-chasa", "151", "На двоих — 4 часа", 240, 30_000),
-    ("na-dvoih-5-chasov", "153", "На двоих — 5 часов", 300, 40_000),
-    ("legkiy-par", "141", "Лёгкий пар (4–5 часов, до 12 гостей)", 300, 60_000),
-    ("stihiya", "143", "Стихия (4–5 часов, до 8 гостей)", 300, 60_000),
-    ("deviche-teplo", "119", "Девичье тепло (5–6 часов, до 12 гостей)", 360, 60_000),
-    ("zhenskaya-stihiya", "121", "Женская стихия (5–6 часов, до 8 гостей)", 360, 60_000),
-    ("sila-ognya", "123", "Сила огня (5–6 часов, до 12 гостей)", 360, 60_000),
-    ("muzhskaya-zakalka", "125", "Мужская закалка (5–6 часов, до 8 гостей)", 360, 60_000),
+    ("vdvoem-zaglyanut", "167", "Вдвоём — Заглянуть в гости · 2,5 ч", 150, 20_000, False),
+    ("vdvoem-pogostit", "169", "Вдвоём — Погостить · 3,5 ч", 210, 25_000, False),
+    ("vdvoem-uzhin", "171", "Вдвоём — Остаться на ужин · 4 ч", 240, 32_000, False),
+    ("vdvoem-do-zvezd", "173", "Вдвоём — Гостить до звёзд · 5 ч", 300, 40_000, False),
+    ("odin-dlya-sebya", "175", "Для одного — Только для себя · 2,5 ч", 150, 20_000, False),
+    ("odin-vosem-masel", "177", "Для одного — Восемь масел · 3,5 ч", 210, 25_000, False),
+    ("odin-ves-vecher", "179", "Для одного — Весь вечер для себя · 5 ч", 300, 35_000, False),
+    ("druzhny-par", "181", "Смешанная — Дружный пар · общий пар, 3–8 гостей", 360, 30_000, False),
+    ("blizkiy-krug", "183", "Смешанная — Близкий круг · пар для каждого, 3–4 гостя", 360, 40_000, False),
+    ("semeyny-sbor", "185", "Смешанная — Семейный сбор · пар для каждого, 6–8 гостей", 360, 50_000, False),
+    ("bolshoy-stol", "187", "Смешанная — Большой стол · пар для каждого, 9–14 гостей", 360, 90_000, True),
+    ("bolshaya-kompaniya", "189", "Смешанная — Большая компания · общий пар, 9–14 гостей", 360, 55_000, True),
+    ("muzhskaya-zakalka", "191", "Мужская — Мужская закалка · общий пар, 3–8 гостей", 360, 30_000, False),
+    ("krepkiy-par", "193", "Мужская — Крепкий пар · пар для каждого, 3–4 гостя", 360, 40_000, False),
+    ("druzhina", "195", "Мужская — Дружина · пар для каждого, 6–8 гостей", 360, 50_000, False),
+    ("sila-ognya", "197", "Мужская — Сила огня · пар для каждого, 9–14 гостей", 360, 90_000, True),
+    ("artel", "199", "Мужская — Артель · общий пар, 9–14 гостей", 360, 55_000, True),
+    ("deviche-teplo", "201", "Женская — Девичье тепло · общий пар, 3–8 гостей", 360, 30_000, False),
+    ("zhenskaya-stihiya", "203", "Женская — Женская стихия · пар для каждого, 3–4 гостя", 360, 40_000, False),
+    ("lugovye-travy", "205", "Женская — Луговые травы · пар для каждого, 6–8 гостей", 360, 50_000, False),
+    ("beregini", "207", "Женская — Берегини · пар для каждого, 9–14 гостей", 360, 90_000, True),
+    ("horovod", "209", "Женская — Хоровод · общий пар, 9–14 гостей", 360, 55_000, True),
 )
 
 
@@ -114,7 +127,7 @@ def hourly_starts(busy: list[tuple[int, int]], duration: int) -> list[str]:
 
 def availability(busy: dict[str, list[list[str]]], today: date) -> dict[str, dict]:
     """Publish derived availability only, without the underlying occupied intervals."""
-    durations = sorted({duration for _, _, _, duration, price in PROGRAMS if price >= FLEX_PRICE})
+    durations = sorted({duration for _, _, _, duration, _, flex in PROGRAMS if flex})
     out = {}
     for i in range(DAYS_AHEAD):
         day = (today + timedelta(days=i)).isoformat()
@@ -188,10 +201,10 @@ BODY = """
       <select id="program" aria-describedby="program-help">
         <option value="">Выберите программу</option>
       </select>
-      <p class="note" id="program-help">Программы дешевле 60 000 ₽ начинаются в 10:00 или 15:00.
-        Утреннее время подходит для программ до четырёх часов.
-        Для программ от 60 000 ₽ доступны свободные часы начала с 10:00 до 16:00. Визит завершится к 22:00.
-        Между визитами мы оставляем час на уборку.</p>
+      <p class="note" id="program-help">Программы до 4 часов можно начать в 10:00 или 15:00, длинные — в 15:00.
+        Для компаний от 9 гостей можно выбрать удобный час начала с 10:00 до 16:00, визит завершится к 22:00.
+        Между визитами мы оставляем час на уборку.
+        Утренний старт длинной программы в будни — по договорённости с администратором.</p>
     </div>
     <h2>Свободные даты</h2>
     <div class="cal-head">
@@ -239,8 +252,8 @@ BODY = """
 
 SCRIPT = r"""
 const TODAY = __TODAY__, DAYS = __DAYS__;
-const FLEX_PRICE = __FLEX_PRICE__, OPEN = "__OPEN__", CLOSE = "__CLOSE__", FLEX_LAST_START = "__FLEX_LAST_START__";
-const PROGRAMS = new Map(__PROGRAMS__.map(([slug, id, label, duration, price]) => [slug, {id, label, duration, price}]));
+const OPEN = "__OPEN__", CLOSE = "__CLOSE__", FLEX_LAST_START = "__FLEX_LAST_START__";
+const PROGRAMS = new Map(__PROGRAMS__.map(([slug, id, label, duration, price, flex]) => [slug, {id, label, duration, price, flex}]));
 const CRM_FIELDS = {
   date: "DEAL_UF_CRM_WISH_DATE",
   program: "DEAL_UF_CRM_WISH_PROGRAM",
@@ -266,7 +279,7 @@ const end = new Date(start); end.setUTCDate(end.getUTCDate() + Object.keys(DAYS)
 const localMidnight = day => Date.parse(`${day}T00:00:00+06:00`);
 const minutes = time => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
 const clock = minute => [Math.floor(minute / 60), minute % 60].map(n => String(n).padStart(2, "0")).join(":");
-const isFlexible = program => program?.price >= FLEX_PRICE;
+const isFlexible = program => program?.flex === true;
 const fits = (program, slot) => !program || program.duration <= minutes(slot.end) - minutes(slot.start);
 const nextMinute = (day, now) => Math.floor((now - localMidnight(day)) / 60000) + 1;
 function slotStatus(day, slot, program, now) {
@@ -439,7 +452,7 @@ function refresh() {
   const freeFixed = fixed.some(slot => !slotStatus(selected, slot, program, now));
   const needsProgram = !program && !freeFixed && someFlexTime(selected, now);
   const nextChoice = starts.length ? "Укажите время начала." : freeFixed ? "Выберите свободный слот."
-    : needsProgram ? "Выберите программу от 60 000 ₽, чтобы увидеть свободное время начала."
+    : needsProgram ? "Выберите программу для компании от 9 гостей, чтобы увидеть свободное время начала."
     : "Подходящего свободного времени нет. Выберите другую дату.";
   info.innerHTML = `<b>${title}</b>. ${nextChoice}`;
   for (const slot of fixed) {
@@ -488,7 +501,7 @@ def render(busy: dict, today: date, updated: datetime) -> str:
     script = (SCRIPT.replace("__TODAY__", json.dumps(today.isoformat()))
               .replace("__DAYS__", json.dumps(availability(busy, today)))
               .replace("__PROGRAMS__", json.dumps(PROGRAMS, ensure_ascii=False))
-              .replace("__FLEX_PRICE__", str(FLEX_PRICE)).replace("__OPEN__", OPEN).replace("__CLOSE__", CLOSE)
+              .replace("__OPEN__", OPEN).replace("__CLOSE__", CLOSE)
               .replace("__FLEX_LAST_START__", FLEX_LAST_START)
               .replace("__FORM_ID__", str(FORM_ID)).replace("__FORM_LOADER__", FORM_LOADER))
     return ("<!doctype html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
