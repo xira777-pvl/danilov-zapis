@@ -53,8 +53,16 @@ def fetch_all(call: Call, method: str, params: dict) -> list[dict]:
         if "error" in page:
             # Bitrix error text never contains the webhook URL.
             raise RuntimeError(f"{page['error']}: {page.get('error_description', '')}")
-        rows.extend(page.get("result", []))
+        result = page.get("result")
+        if not isinstance(result, list):
+            # Never read a malformed reply as "no rows": the booking calendar
+            # would publish booked days as free.
+            raise RuntimeError(f"{method}: reply has no result list at {start}")
+        rows.extend(result)
         if "next" not in page:
+            total = page.get("total")
+            if isinstance(total, int) and len(rows) < total:
+                raise RuntimeError(f"{method}: got {len(rows)} of {total} rows")
             return rows
         if page["next"] <= start:
             raise RuntimeError(f"pagination did not advance at {start}")
