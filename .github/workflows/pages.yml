@@ -1,5 +1,5 @@
 # Rebuilds the public booking page from Bitrix CRM deals every hour and publishes it
-# to GitHub Pages. Needs the repository secret BITRIX_WEBHOOK_URL (a CRM-only webhook).
+# to GitHub Pages at /full/; the Pages root redirects to danilovhouse.ru/zapis/. Needs the repository secret BITRIX_WEBHOOK_URL (a CRM-only webhook).
 name: pages
 
 on:
@@ -34,8 +34,11 @@ jobs:
         env:
           BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
         run: |
-          mkdir -p site
-          uv run --no-project --python 3.12 --with certifi python -m brief.booking_page site/index.html
+          # The full page lives at /full/ (danilovhouse.ru/zapis/ pulls it from there);
+          # the old root URL forwards visitors to danilovhouse.ru/zapis/.
+          mkdir -p site/full
+          uv run --no-project --python 3.12 --with certifi python -m brief.booking_page site/full/index.html
+          cp redirect/index.html site/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
