@@ -19,6 +19,10 @@ DEFAULT_FUNNEL = {"ID": "0", "NAME": "Клиенты"}
 # The macOS file bundle (/etc/ssl/cert.pem) lacks newer roots such as
 # GlobalSign Root R46, which signs *.bitrix24.ru; certifi keeps them current.
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+# In the cloud, HTTPS goes through a proxy whose CA is in the system store and SSL_CERT_FILE.
+SSL_CONTEXT.load_default_certs()
+if os.path.isfile(os.environ.get("SSL_CERT_FILE", "")):
+    SSL_CONTEXT.load_verify_locations(cafile=os.environ["SSL_CERT_FILE"])
 
 
 # Pauses before the 2nd and 3rd attempt. A VPN or proxy on this Mac sometimes breaks
@@ -106,6 +110,9 @@ F_PREPAID, F_SURCHARGE = "UF_CRM_1790612405079", "UF_CRM_SURCHARGE"
 F_PREPAY_METHOD, F_SURCHARGE_METHOD = "UF_CRM_PREPAY_METHOD", "UF_CRM_SURCHARGE_METHOD"
 VISIT_SELECT = ["ID", "TITLE", "CONTACT_ID", "STAGE_ID", "STAGE_SEMANTIC_ID", "CATEGORY_ID", "OPPORTUNITY",
                 F_VISIT, F_HOURS, F_PREPAID, F_SURCHARGE, F_PREPAY_METHOD, F_SURCHARGE_METHOD]
+# The public booking calendar needs only when a visit is and whether the deal is lost:
+# no names, contacts or money ever reach the hosting that builds it.
+SLOT_SELECT = ["ID", "STAGE_SEMANTIC_ID", F_VISIT, F_HOURS]
 NO_TIME = "время не указано"
 
 
@@ -123,14 +130,14 @@ def visit_time(start: datetime, end: datetime | None, timed: bool) -> str:
     return f"{start:%H:%M}–{end:%H:%M}" if end else f"с {start:%H:%M}"
 
 
-def visits(call: Call, first: date, last: date) -> list[dict]:
+def visits(call: Call, first: date, last: date, select: list[str] = VISIT_SELECT) -> list[dict]:
     """Visits on Omsk days [first, last): deals of any funnel that are not lost, by «Время записи».
 
     The deal is the only place a visit is entered; Bitrix online booking is not read.
     """
     deals = fetch_all(call, "crm.deal.list", {
         f"filter[>={F_VISIT}]": omsk_day_range(first)[0], f"filter[<{F_VISIT}]": omsk_day_range(last)[0],
-        "filter[!STAGE_SEMANTIC_ID]": "F", "select[]": VISIT_SELECT})
+        "filter[!STAGE_SEMANTIC_ID]": "F", "select[]": select})
     out = []
     for d in deals:
         if not d.get(F_VISIT) or d.get("STAGE_SEMANTIC_ID") == "F":
