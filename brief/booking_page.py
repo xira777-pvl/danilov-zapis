@@ -6,13 +6,15 @@ The guest chooses a program and time, then requests confirmation through the for
 
 Usage: python -m brief.booking_page <out.html>   (needs BITRIX_WEBHOOK_URL)
 """
+import hashlib
 import json
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta
 from urllib.error import HTTPError
 
-from brief.bitrix import make_call, visits
+from brief.bitrix import SLOT_SELECT, make_call, visits
 from brief.dates import OMSK, omsk_today
 
 DAYS_AHEAD = 62
@@ -20,7 +22,7 @@ OPEN, CLOSE = "10:00", "22:00"
 FLEX_LAST_START = "16:00"
 FORM_ID, FORM_SEC = 29, "49w4ka"  # CRM form «Заявка на запись (страница с календарём)»
 FORM_LOADER = "https://cdn-ru.bitrix24.ru/b38758868/crm/form/loader_29.js"
-OFERTA = "https://danilovhouse.ru/oferta.html"
+OFERTA = "https://danilovhouse.ru/p/oferta/"  
 # Public catalog order; IDs refer to the Bitrix «Желаемая программа» (UF_CRM_WISH_PROGRAM) options.
 # Tuple: (slug, Bitrix option ID, label, minutes, base price, flexible start). Flexible start
 # (any free hour 10:00–16:00) is for groups of 9–14 guests; the rest use the fixed slots.
@@ -35,18 +37,18 @@ PROGRAMS = (
     ("druzhny-par", "181", "Смешанная — Дружный пар · общий пар, 3–8 гостей", 360, 30_000, False),
     ("blizkiy-krug", "183", "Смешанная — Близкий круг · пар для каждого, 3–4 гостя", 360, 40_000, False),
     ("semeyny-sbor", "185", "Смешанная — Семейный сбор · пар для каждого, 5–8 гостей", 360, 50_000, False),
-    ("bolshoy-stol", "187", "Смешанная — Большой стол · пар для каждого, 9–14 гостей", 360, 80_000, True),
-    ("bolshaya-kompaniya", "189", "Смешанная — Большая компания · общий пар, 9–14 гостей", 360, 50_000, True),
+    ("bolshoy-stol", "187", "Смешанная — Большой стол · пар для каждого, 9–14 гостей", 360, 90_000, True),
+    ("bolshaya-kompaniya", "189", "Смешанная — Большая компания · общий пар, 9–14 гостей", 360, 55_000, True),
     ("muzhskaya-zakalka", "191", "Мужская — Мужская закалка · общий пар, 3–8 гостей", 360, 30_000, False),
     ("krepkiy-par", "193", "Мужская — Крепкий пар · пар для каждого, 3–4 гостя", 360, 40_000, False),
     ("druzhina", "195", "Мужская — Дружина · пар для каждого, 5–8 гостей", 360, 50_000, False),
-    ("sila-ognya", "197", "Мужская — Сила огня · пар для каждого, 9–14 гостей", 360, 80_000, True),
-    ("artel", "199", "Мужская — Артель · общий пар, 9–14 гостей", 360, 50_000, True),
+    ("sila-ognya", "197", "Мужская — Сила огня · пар для каждого, 9–14 гостей", 360, 90_000, True),
+    ("artel", "199", "Мужская — Артель · общий пар, 9–14 гостей", 360, 55_000, True),
     ("deviche-teplo", "201", "Женская — Девичье тепло · общий пар, 3–8 гостей", 360, 30_000, False),
     ("zhenskaya-stihiya", "203", "Женская — Женская стихия · пар для каждого, 3–4 гостя", 360, 40_000, False),
     ("lugovye-travy", "205", "Женская — Луговые травы · пар для каждого, 5–8 гостей", 360, 50_000, False),
-    ("beregini", "207", "Женская — Берегини · пар для каждого, 9–14 гостей", 360, 80_000, True),
-    ("horovod", "209", "Женская — Хоровод · общий пар, 9–14 гостей", 360, 50_000, True),
+    ("beregini", "207", "Женская — Берегини · пар для каждого, 9–14 гостей", 360, 90_000, True),
+    ("horovod", "209", "Женская — Хоровод · общий пар, 9–14 гостей", 360, 55_000, True),
 )
 
 
@@ -155,6 +157,7 @@ font:inherit;color:var(--ink);padding:9px 8px}
 .program select:focus-visible,.flex-choice select:focus-visible{outline:2px solid var(--green);outline-offset:2px}
 .flex-choice{margin-top:10px}
 #form-status:empty{display:none}
+#stale-notice{color:var(--part-ink);margin:0 0 10px}
 #booking-crm{border:0;margin:0;padding:0;min-inline-size:0}
 #booking-crm [data-booking-synced]{display:none!important}
 .cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
@@ -210,6 +213,7 @@ BODY = """
         итоговую сумму подтвердит администратор.</p>
     </div>
     <h2>Свободные даты</h2>
+    <p class="note" id="stale-notice" role="status" hidden>Расписание могло измениться. Точное время подтвердит менеджер.</p>
     <div class="cal-head">
       <button id="prev" aria-label="Предыдущий месяц">‹</button>
       <div class="month" id="month"></div>
@@ -230,7 +234,7 @@ BODY = """
       </select>
     </div>
     <p class="note">Время указано по Омску.</p>
-    <p class="note">Календарь для ориентира, обновлён __UPDATED__ (Омск). Записаться в нём нельзя:
+    <p class="note">Календарь для ориентира, обновлён <span id="updated">__UPDATED__</span> (Омск). Записаться в нём нельзя:
       оставьте заявку ниже, менеджер свяжется и подтвердит дату.</p>
   </div>
 
@@ -254,7 +258,19 @@ BODY = """
 """
 
 SCRIPT = r"""
-const TODAY = __TODAY__, DAYS = __DAYS__;
+// Availability and read stamps come from #zapis-data (plan 3.3.1); the page re-downloads
+// itself to stay fresh (plan 3.3.2). All freshness math uses the server's clock.
+// The hosting rebuilds at :05 and :35 (owner decision 2026-11-28): data is normally up to 30 min old,
+// so the timer starts asking for a newer copy only at 31 min, and the notice waits for a missed build.
+const REFRESH_AFTER = 1860, STALE_AFTER = 4500, FETCH_TIMEOUT = 8;  // seconds
+const LOST_TEXT = "Это время только что заняли. Выберите другое.";
+const PAGE_DATA = JSON.parse(document.getElementById("zapis-data").textContent);
+let TODAY = PAGE_DATA.today, DAYS = PAGE_DATA.days;
+let readStarted = PAGE_DATA.read_started, built = PAGE_DATA.built;
+// anchor: server time (Date header, ms) of the last accepted answer and performance.now() then.
+// resumed: the tab came back (the stopwatch may have stood still); freshness is unknown until
+// the next accepted answer, and resumeFailed once a fetch after the return failed.
+let anchor = null, attempted = false, inflight = null, lost = false, resumed = false, resumeFailed = false;
 const OPEN = "__OPEN__", CLOSE = "__CLOSE__", FLEX_LAST_START = "__FLEX_LAST_START__";
 const PROGRAMS = new Map(__PROGRAMS__.map(([slug, id, label, duration, price, flex]) => [slug, {id, label, duration, price, flex}]));
 const CRM_FIELDS = {
@@ -277,8 +293,6 @@ const MONTHS_OF = ["января","февраля","марта","апреля","
 const WEEKDAYS = ["воскресенье","понедельник","вторник","среда","четверг","пятница","суббота"];
 // Calendar dates use UTC as date-only values; slot instants use Asia/Omsk (UTC+06).
 const iso = d => d.toISOString().slice(0, 10);
-const start = new Date(TODAY + "T00:00:00Z");
-const end = new Date(start); end.setUTCDate(end.getUTCDate() + Object.keys(DAYS).length - 1);
 const localMidnight = day => Date.parse(`${day}T00:00:00+06:00`);
 const minutes = time => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
 const clock = minute => [Math.floor(minute / 60), minute % 60].map(n => String(n).padStart(2, "0")).join(":");
@@ -312,9 +326,83 @@ function state(d, now) {
   if (count) return count === compatible.length ? "free" : "part";
   return !program && someFlexTime(day, now) ? "part" : "busy";
 }
-const first = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
-const lastMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
-let view = first, selected = null, selectedStart = null, nativeForm = null;
+let first, lastMonth, view = null, selected = null, selectedStart = null, nativeForm = null;
+function setBounds() {
+  const start = new Date(TODAY + "T00:00:00Z");
+  const end = new Date(start); end.setUTCDate(end.getUTCDate() + Object.keys(DAYS).length - 1);
+  first = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  lastMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  view = !view || view < first ? first : view > lastMonth ? lastMonth : view;
+}
+setBounds();
+
+// Freshness (plan 3.3.2). The device clock is never used to judge it.
+const serverNow = () => anchor.server + performance.now() - anchor.perf;
+const dataAge = () => anchor ? serverNow() / 1000 - readStarted : null;
+const refreshDue = () => !anchor || resumed || dataAge() > REFRESH_AFTER;
+const isStale = () => resumed ? resumeFailed : anchor ? dataAge() > STALE_AFTER : attempted;
+const omskTime = (unix, pattern) => {
+  const t = new Date((unix + 6 * 3600) * 1000).toISOString();
+  return pattern === "date" ? `${t.slice(8, 10)}.${t.slice(5, 7)} ${t.slice(11, 16)}` : t.slice(11, 16);
+};
+function staleLine() {
+  if (!isStale()) return "";
+  return anchor ? `Расписание на странице от ${omskTime(readStarted)} (Омск), время не подтверждено`
+    : "Расписание на странице не проверено, время не подтверждено";
+}
+// A whole, well-formed answer only: a broken one must never replace the working schedule.
+const HHMM = /^\d{2}:\d{2}$/, ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const validSlot = slot => slot && typeof slot.id === "string" && typeof slot.label === "string"
+  && HHMM.test(slot.start) && HHMM.test(slot.end) && typeof slot.available === "boolean";
+const validDay = data => data && Array.isArray(data.slots) && data.slots.length > 0 && data.slots.every(validSlot)
+  && data.starts && typeof data.starts === "object"
+  && Object.values(data.starts).every(list => Array.isArray(list) && list.every(time => HHMM.test(time)));
+function validAnswer(next) {
+  if (next?.version !== 1 || !Number.isInteger(next.read_started) || !Number.isInteger(next.built)
+      || next.read_started > next.built || next.built < built
+      || typeof next.today !== "string" || !ISO_DAY.test(next.today)
+      || !next.days || typeof next.days !== "object") return false;
+  const days = Object.keys(next.days);
+  return days.length > 0 && days[0] === next.today && days.every(day => ISO_DAY.test(day) && validDay(next.days[day]));
+}
+function accept(next, server, perf) {
+  const now = Date.now(), before = activeChoice(now);
+  anchor = {server, perf};
+  resumed = false;
+  readStarted = next.read_started; built = next.built;
+  TODAY = next.today; DAYS = next.days;
+  setBounds();
+  if (before && DAYS[selected] && !activeChoice(now)) { lost = true; selectedStart = null; }
+  document.getElementById("updated").textContent = omskTime(built, "date");
+}
+// One request at a time; resolves true when an answer was accepted.
+function fetchSelf() {
+  if (inflight) return inflight;
+  const abort = new AbortController(), timer = setTimeout(() => abort.abort(), FETCH_TIMEOUT * 1000);
+  let ok = false;
+  inflight = (async () => {
+    try {
+      const res = await fetch(location.pathname + "?t=" + Date.now(), {cache: "no-store", signal: abort.signal});
+      const perf = performance.now(), server = Date.parse(res.headers.get("Date") || "");
+      if (res.status !== 200 || !Number.isFinite(server)) return false;
+      const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+      const next = JSON.parse(doc.getElementById("zapis-data")?.textContent || "null");
+      if (!validAnswer(next)) return false;
+      accept(next, server, perf);
+      ok = true;
+      return true;
+    } catch (error) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+      attempted = true;
+      if (!ok && resumed) resumeFailed = true;
+      inflight = null;
+      refresh();
+    }
+  })();
+  return inflight;
+}
 
 function activeChoice(now) {
   if (!selected || selectedStart === null) return null;
@@ -344,7 +432,8 @@ function syncForm(choice) {
   const actual = nativeForm.values();
   const fieldsMatch = Object.entries(expected).every(([name, value]) => (actual[name]?.[0] || "") === value);
   crm.disabled = !fieldsMatch || !currentProgram() || !choice;
-  formStatus.textContent = fieldsMatch ? "" : "Не удалось передать выбор в заявку. Обновите страницу и попробуйте снова.";
+  formStatus.textContent = !fieldsMatch ? "Не удалось передать выбор в заявку. Обновите страницу и попробуйте снова."
+    : lost && !choice ? LOST_TEXT : "";
 }
 
 function connectForm(event) {
@@ -369,13 +458,21 @@ function connectForm(event) {
   let restoreComment = null;
   form.subscribe("submit", data => {
     restoreComment?.();
-    const choice = refresh();
-    if (crm.disabled) {
-      data.promise = Promise.reject(new Error("Выберите программу, дату и доступное время."));
-      return;
-    }
+    // The form waits for this promise before it reads the values and sends them.
+    data.promise = (async () => {
+      // Always asks for the newest copy (one fetch per request; a standby pull or a switch-time
+      // build can publish before the 31-minute timer would ask). fetchSelf also waits for a check
+      // already running. Bounded by FETCH_TIMEOUT; a failure never blocks.
+      await fetchSelf();
+      const choice = refresh();
+      if (lost) throw new Error(LOST_TEXT);
+      if (crm.disabled || !choice) throw new Error("Выберите программу, дату и доступное время.");
+      setComment(choice);
+    })();
+  });
+  function setComment(choice) {
     const heading = isFlexible(currentProgram()) ? "Желаемое время" : "Желаемый слот";
-    const note = `${heading}: ${choice.start}–${choice.end} (Омск)`;
+    const note = [`${heading}: ${choice.start}–${choice.end} (Омск)`, staleLine()].filter(Boolean).join("\n");
     const comment = form.values()[CRM_FIELDS.comment]?.[0] || "";
     const submitted = comment ? `${note}\n\n${comment}` : note;
     form.setValues({[CRM_FIELDS.comment]: submitted});
@@ -383,7 +480,7 @@ function connectForm(event) {
       form.setValues({[CRM_FIELDS.comment]: comment});
       restoreComment = null;
     };
-  });
+  }
   // The native widget captures values before this event, then sends its own payload.
   form.subscribe("submit:post:before", () => restoreComment?.());
   form.subscribe("send:error", () => restoreComment?.());
@@ -417,6 +514,7 @@ function pick(d) {
   if (state(d, Date.now()) === "past") return refresh();
   selected = iso(d);
   selectedStart = null;
+  lost = false;
   refresh();
 }
 
@@ -440,6 +538,7 @@ function refresh() {
   render(now);
   syncForm(choice);
   renderFlexible(starts);
+  document.getElementById("stale-notice").hidden = !isStale();
   const panel = document.getElementById("slots"), summary = document.getElementById("selection");
   const info = document.getElementById("info");
   const programLine = program ? `<strong>${program.label}</strong>` : "";
@@ -454,7 +553,7 @@ function refresh() {
   const fixed = flexible ? [] : data.slots;
   const freeFixed = fixed.some(slot => !slotStatus(selected, slot, program, now));
   const needsProgram = !program && !freeFixed && someFlexTime(selected, now);
-  const nextChoice = starts.length ? "Укажите время начала." : freeFixed ? "Выберите свободный слот."
+  const nextChoice = lost && !choice ? LOST_TEXT : starts.length ? "Укажите время начала." : freeFixed ? "Выберите свободный слот."
     : needsProgram ? "Выберите программу для компании от 9 гостей, чтобы увидеть свободное время начала."
     : "Подходящего свободного времени нет. Выберите другую дату.";
   info.innerHTML = `<b>${title}</b>. ${nextChoice}`;
@@ -468,7 +567,7 @@ function refresh() {
     const status = unavailable || (chosen ? "Выбран" : "Свободен");
     el.innerHTML = `<span class="slot-name">${slot.label}</span><span class="slot-time">${slot.start}–${slot.end}</span><small>${status}</small>`;
     el.onclick = () => {
-      if (!slotStatus(selected, slot, currentProgram(), Date.now())) selectedStart = minutes(slot.start);
+      if (!slotStatus(selected, slot, currentProgram(), Date.now())) { selectedStart = minutes(slot.start); lost = false; }
       refresh();
     };
     panel.appendChild(el);
@@ -479,16 +578,29 @@ function refresh() {
   summary.innerHTML = `Ваш выбор<strong>${title}</strong>${timeLine}${programLine}<p>${nextStep}</p>`;
   return choice;
 }
-programSelect.addEventListener("change", () => refresh());
+programSelect.addEventListener("change", () => { lost = false; refresh(); });
 timeSelect.addEventListener("change", () => {
   selectedStart = timeSelect.value ? minutes(timeSelect.value) : null;
+  lost = false;
   refresh();
 });
 document.getElementById("prev").onclick = () => { view = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() - 1, 1)); refresh(); };
 document.getElementById("next").onclick = () => { view = new Date(Date.UTC(view.getUTCFullYear(), view.getUTCMonth() + 1, 1)); refresh(); };
-document.addEventListener("visibilitychange", refresh);
-setInterval(refresh, 30000);
+// Returning to the tab always re-checks: the stopwatch may have stood still while asleep,
+// so until an answer arrives the data's age is unknown.
+function resume() {
+  resumed = true;
+  resumeFailed = false;
+  fetchSelf();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") resume();
+  refresh();
+});
+window.addEventListener("pageshow", event => { if (event.persisted) resume(); });
+setInterval(() => { if (refreshDue()) fetchSelf(); refresh(); }, 30000);
 refresh();
+fetchSelf();
 
 const loader = document.createElement("script");
 loader.async = true;
@@ -498,12 +610,30 @@ document.head.appendChild(loader);
 """
 
 
-def render(busy: dict, today: date, updated: datetime) -> str:
+def days_fingerprint(days: dict) -> str:
+    """SHA-256 of the availability in canonical JSON: two builds that publish the same days print
+    the same value (the hosting dry run is compared with a reference build on the Mac, A3)."""
+    canonical = json.dumps(days, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def page_data(days: dict, today: date, read_started: int, built: int) -> str:
+    """The #zapis-data JSON (plan 3.3.1); `</` is escaped so it cannot close its element."""
+    data = {"version": 1, "read_started": read_started, "built": built, "today": today.isoformat(), "days": days}
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+
+
+def render(busy: dict, today: date, updated: datetime, *, read_started: int | None = None,
+           built: int | None = None) -> str:
+    # Unix seconds of the Bitrix read: it started at `read_started` and returned at `built`.
+    # The hosting job and the standby pull compare them (handover rule), so each meta
+    # stays alone on its line in exactly this form.
+    read_started = int(updated.timestamp()) if read_started is None else int(read_started)
+    built = int(updated.timestamp()) if built is None else int(built)
+    days = availability(busy, today)
     body = (BODY.replace("__UPDATED__", f"{updated:%d.%m %H:%M}").replace("__OFERTA__", OFERTA)
             .replace("__FORM_ID__", str(FORM_ID)).replace("__FORM_SEC__", FORM_SEC))
-    script = (SCRIPT.replace("__TODAY__", json.dumps(today.isoformat()))
-              .replace("__DAYS__", json.dumps(availability(busy, today)))
-              .replace("__PROGRAMS__", json.dumps(PROGRAMS, ensure_ascii=False))
+    script = (SCRIPT.replace("__PROGRAMS__", json.dumps(PROGRAMS, ensure_ascii=False))
               .replace("__OPEN__", OPEN).replace("__CLOSE__", CLOSE)
               .replace("__FLEX_LAST_START__", FLEX_LAST_START)
               .replace("__FORM_ID__", str(FORM_ID)).replace("__FORM_LOADER__", FORM_LOADER))
@@ -511,25 +641,32 @@ def render(busy: dict, today: date, updated: datetime) -> str:
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             "<title>Форма бронирования — В гостях у Даниловых</title>\n"
             "<meta name=\"robots\" content=\"noindex\">\n"
-            f"<style>{CSS}</style>\n</head>\n<body>{body}<script>{script}</script>\n</body>\n</html>\n")
+            f"<meta name=\"zapis-read-start\" content=\"{read_started}\">\n"
+            f"<meta name=\"zapis-built\" content=\"{built}\">\n"
+            f"<style>{CSS}</style>\n</head>\n<body>{body}"
+            f"<script type=\"application/json\" id=\"zapis-data\">{page_data(days, today, read_started, built)}</script>\n"
+            f"<script>{script}</script>\n</body>\n</html>\n")
 
 
 def main() -> int:
     out = sys.argv[1]
     call = make_call(os.environ["BITRIX_WEBHOOK_URL"])
     today = omsk_today()
+    # Everything on the page is read from Bitrix between these two stamps (plan 3.3.1).
+    read_started = int(time.time())
     # From yesterday: a visit that started then may still occupy this morning.
     try:
-        vs = visits(call, today - timedelta(days=1), today + timedelta(days=DAYS_AHEAD))
+        vs = visits(call, today - timedelta(days=1), today + timedelta(days=DAYS_AHEAD), SLOT_SELECT)
     except HTTPError as exc:
         # Bitrix's JSON error (e.g. insufficient_scope) never contains the webhook URL.
         print(f"Bitrix HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:300]}", file=sys.stderr)
         return 1
+    built = int(time.time())
     busy = busy_days(vs)
     busy = {d: spans for d, spans in busy.items() if d >= today.isoformat()}
     with open(out, "w", encoding="utf-8") as f:
-        f.write(render(busy, today, datetime.now(OMSK)))
-    print(json.dumps({"days_busy": len(busy)}))
+        f.write(render(busy, today, datetime.fromtimestamp(built, OMSK), read_started=read_started, built=built))
+    print(json.dumps({"days_busy": len(busy), "days_sha256": days_fingerprint(availability(busy, today))}))
     return 0
 
 
